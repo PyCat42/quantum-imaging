@@ -33,6 +33,8 @@ def sample_sinc2(sobol_2):
     mask_right = (peak >= p1 + p0)
     samples[mask_right] = norm.ppf(val[mask_right], loc=mu, scale=sigma_1)
 
+    return samples
+
 def sinc2_approximation(x):
     """
     Calculating sinc2 function that is approximated by the sum of three Gaussians:
