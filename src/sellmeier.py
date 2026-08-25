@@ -49,6 +49,34 @@ def n_e_LiNbO3(wavelength, temp=25):
                    + (a4_e + b4_e * f(temp))/(wavelength2 - a5_e**2)
                    - a6_e * wavelength2)
 
+def dn_e_LiNbO3_dlambda(wavelength, temp=25):
+    """
+    Calculates extraordinary refractive index using Sellmeier equation.
+    :param wavelength: in m
+    :param temp: temperature of the crystal in deg C
+    :return: n_e
+    """
+    # extraordinary params
+    a2_e = 0.0983
+    a3_e = 0.2020
+    a4_e = 189.32
+    a5_e = 12.52
+    a6_e = 1.32e-2
+
+    b2_e = 4.700e-8
+    b3_e = 6.113e-8
+    b4_e = 1.516e-4
+
+    wavelength2 = (wavelength * 1e6)**2
+
+    # dn / dlambda = 1 / (2n) (d(n^2) / dlambda)
+    dn2_dlambda = 2 * wavelength * (
+        - (a2_e + b2_e * f(temp)) / (wavelength2 - (a3_e + b3_e * f(temp)) ** 2)**2
+        - (a4_e + b4_e * f(temp)) / (wavelength2 - a5_e ** 2)**2
+        - a6_e
+    )
+
+    return dn2_dlambda / (2 * n_e_LiNbO3(wavelength, temp))
 
 def n_o_LiNbO3(wavelength, temp=25):
     """
@@ -76,6 +104,34 @@ def n_o_LiNbO3(wavelength, temp=25):
                    (a2_o + b2_o * f(temp))/(wavelength2 - (a3_o + b3_o * f(temp))**2)
                    + (a4_o + b4_o * f(temp))/(wavelength2 - a5_o**2)
                    - a6_o * wavelength2)
+
+def dn_o_LiNbO3_dlambda(wavelength, temp=25):
+    """
+    Calculates ordinary refractive index using Sellmeier equation.
+    :param wavelength: in m
+    :param temp: temperature of the crystal in deg C
+    :return: n_o
+    """
+    # ordinary params
+    a2_o = 0.1185
+    a3_o = 0.2091
+    a4_o = 89.61
+    a5_o = 10.85
+    a6_o = 1.97e-2
+
+    b2_o = 3.134e-8
+    b3_o = -4.641e-9
+    b4_o = -2.188e-6
+
+    wavelength2 = (wavelength * 1e6)**2
+
+    dn2_dlambda = 2 * wavelength * (
+        (a2_o + b2_o * f(temp))/(wavelength2 - (a3_o + b3_o * f(temp))**2)**2
+        + (a4_o + b4_o * f(temp))/(wavelength2 - a5_o**2)**2
+        - a6_o
+    )
+
+    return dn2_dlambda / (2 * n_o_LiNbO3(wavelength, temp))
 
 # --------------------------------------------------------------------------------------
 # KTP Sellmeier equation params and temperature dependency
@@ -121,6 +177,39 @@ def n_x_KTP(wavelength, temp=25):
 
     return n_x + temp * dnx
 
+def dn_x_KTP_dlambda(wavelength, temp=25):
+    """
+    Calculates refractive index along x direction.
+    :param wavelength: in m
+    :param temp: crystal temperature in deg C
+    (KTP indices from Kato and Takaoka are temperature independent, but we want to match function calls)
+    :return:
+    """
+    wavelength_microm = wavelength * 1e6 # equations use wavelength in micrometers
+
+    B_x = 0.04140
+    C_x = 0.03978
+    D_x = 9.35522
+    E_x = 31.45571
+    dn2_dlambda = 2 * wavelength * (
+        - B_x / (wavelength_microm**2 - C_x)**2
+        - D_x / (wavelength_microm**2 - E_x)**2
+    )
+    dn_dlambda = dn2_dlambda / (2 * n_x_KTP(wavelength, temp))
+
+    # Temperature dependence
+    A_T_x = 0.1717
+    B_T_x = - 0.5353
+    C_T_x = 0.8416
+    ddn_dlambda = (
+        - 3 * A_T_x / wavelength_microm**4
+        - 2 * B_T_x / wavelength_microm**3
+        - C_T_x / wavelength_microm**2
+    ) * 1e-5
+    # temperature dependence is valid in range 0.43 <= wavelength_microm <= 1.3
+
+    return dn_dlambda + temp * ddn_dlambda
+
 def n_y_KTP(wavelength, temp=25):
     """
     Calculates refractive index along y direction.
@@ -155,6 +244,39 @@ def n_y_KTP(wavelength, temp=25):
 
     return n_y + temp * dny
 
+def dn_y_KTP_dlambda(wavelength, temp=25):
+    """
+    Calculates refractive index along y direction.
+    :param wavelength: in m
+    :param temp: crystal temperature in deg C
+    (KTP indices from Kato and Takaoka are temperature independent, but we want to match function calls)
+    :return:
+    """
+    wavelength_microm = wavelength * 1e6
+
+    B_y = 0.04341
+    C_y = 0.04597
+    D_y = 16.98825
+    E_y = 39.43799
+    dn2_dlambda = 2 * wavelength * (
+        B_y / (wavelength_microm**2 - C_y)**2
+        + D_y / (wavelength_microm**2 - E_y)**2
+    )
+    dn_dlambda = dn2_dlambda / (2 * n_y_KTP(wavelength, temp))
+
+    # Temperature dependence
+    A_T_y = 0.1997
+    B_T_y = - 0.4063
+    C_T_y = 0.5154
+    ddn_dlambda = (
+        - 3 * A_T_y / wavelength_microm ** 4
+        - 2 * B_T_y / wavelength_microm ** 3
+        - C_T_y / wavelength_microm ** 2
+    ) * 1e-5
+    # temperature dependence is valid in range 0.43 <= wavelength_microm <= 1.3
+
+    return dn_dlambda + temp * ddn_dlambda
+
 def n_z_KTP(wavelength, temp=25):
     """
     Calculates refractive index along z direction.
@@ -175,32 +297,85 @@ def n_z_KTP(wavelength, temp=25):
         + D_z / (wavelength_microm**2 - E_z)
     )
 
-    if wavelength_microm <= 1.5:
-        A_T_z = 0.9221
-        B_T_z = - 2.9220
-        C_T_z = 3.6677
-        D_T_z = - 0.1897
-        dnz = (
-            A_T_z / wavelength_microm ** 3
-            + B_T_z / wavelength_microm ** 2
-            + C_T_z / wavelength_microm
-            + D_T_z
-        ) * 1e-5
-    else:
-        A_T_z = - 0.5523
-        B_T_z = 3.3920
-        C_T_z = - 1.7101
-        D_T_z = 0.3424
-        dnz = (
-            A_T_z / wavelength_microm
-            + B_T_z
-            + C_T_z * wavelength_microm
-            + D_T_z * wavelength_microm**2
-        ) * 1e-5
+    A_T_z = 0.9221
+    B_T_z = - 2.9220
+    C_T_z = 3.6677
+    D_T_z = - 0.1897
+    dnz_1 = (
+        A_T_z / wavelength_microm ** 3
+        + B_T_z / wavelength_microm ** 2
+        + C_T_z / wavelength_microm
+        + D_T_z
+    ) * 1e-5
+
+    A_T_z = - 0.5523
+    B_T_z = 3.3920
+    C_T_z = - 1.7101
+    D_T_z = 0.3424
+    dnz_2 = (
+        A_T_z / wavelength_microm
+        + B_T_z
+        + C_T_z * wavelength_microm
+        + D_T_z * wavelength_microm**2
+    ) * 1e-5
     # temperature dependence is valid in range 0.53 <= wavelength_microm <= 3.53
+
+    dnz = np.where(
+        wavelength_microm <= 1.5,
+        dnz_1,
+        dnz_2
+    )
 
     return n_z + temp * dnz
 
+def dn_z_KTP_dlambda(wavelength, temp=25):
+    """
+    Calculates refractive index along z direction.
+    :param wavelength: in m
+    :param temp: crystal temperature in deg C
+    (KTP indices from Kato and Takaoka are temperature independent, but we want to match function calls)
+    :return:
+    """
+    wavelength_microm = wavelength * 1e6
+
+    B_z = 0.06206
+    C_z = 0.04763
+    D_z = 110.80672
+    E_z = 86.12171
+    dn2_dlambda = 2 * wavelength * (
+        - B_z / (wavelength_microm**2 - C_z)**2
+        - D_z / (wavelength_microm**2 - E_z)**2
+    )
+    dn_dlambda = dn2_dlambda / (2 * n_z_KTP(wavelength, temp))
+
+    A_T_z = 0.9221
+    B_T_z = - 2.9220
+    C_T_z = 3.6677
+    ddn_dlambda_1 = (
+        A_T_z / wavelength_microm ** 4
+        + B_T_z / wavelength_microm ** 3
+        + C_T_z / wavelength_microm ** 2
+    ) * 1e-5
+
+    # -------------------------------------------
+
+    A_T_z = - 0.5523
+    C_T_z = - 1.7101
+    D_T_z = 0.3424
+    ddn_dlambda_2 = (
+        - A_T_z / wavelength_microm ** 2
+        + C_T_z
+        + 2 * D_T_z * wavelength_microm
+    ) * 1e-5
+    # temperature dependence is valid in range 0.53 <= wavelength_microm <= 3.53
+
+    ddn_dlambda = np.where(
+        wavelength_microm <= 1.5,
+        ddn_dlambda_1,
+        ddn_dlambda_2
+    )
+
+    return dn_dlambda + temp * ddn_dlambda
 
 # --------------------------------------------------------------------------------------
 
@@ -216,3 +391,22 @@ def n_eff(n_1, n_2, wavelength, theta, temp=25):
     """
     return 1 / np.sqrt((np.sin(theta)**2 / n_1(wavelength, temp)**2)
                        + np.cos(theta)**2 / n_2(wavelength, temp)**2)
+
+def dn_eff_dlambda(n_1, dn_1_dlambda, n_2, dn_2_dlambda, wavelength, theta, temp=25):
+    """
+    Calculates effective refractive index for LiNbO3 crystal.
+    :param n_1: function used for the calculation of the ordinary refraction index equivalent
+    :param n_2: function used for the calculation of the extraordinary refraction index equivalent
+    :param wavelength: in m
+    :param theta: angle between the optical axis and propagation direction
+    :param temp: crystal temperature
+    :return: n_eff
+    """
+    # n_eff = A^(-1/2)
+    # A = np.sin(theta)**2 / n_1(wavelength, temp)**2
+    #      + np.cos(theta)**2 / n_2(wavelength, temp)**2
+    # dn_eff_dlambda = -1/2 A^(-3/2) dA/dlambda
+
+    return (- (1 / 2) * n_eff(n_1, n_2, wavelength, theta, temp)**3
+            * (np.sin(theta)**2 / n_1(wavelength, temp)**3 * dn_1_dlambda(wavelength, temp)
+               + np.cos(theta)**2 / n_2(wavelength, temp)**3 * dn_2_dlambda(wavelength, temp)))
