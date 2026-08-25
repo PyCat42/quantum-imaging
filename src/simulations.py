@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
-import numpy as np
 from numpy.lib._stride_tricks_impl import sliding_window_view
 from scipy.constants import c, pi, epsilon_0
 from scipy.stats import norm, qmc
@@ -15,17 +14,19 @@ class SPDC():
     """
     Class for simulation of SPDC source.
     """
-    def __init__(self, L=2e-3, t=25, period=5.827e-6, m=-1, chi_eff=16.6e-12,
+    def __init__(self, L=2e-3, t=25, period=5.32e-6, m=-1, chi_eff=6e-12,
                  lambda_p=405e-9, n_p=n_x_KTP,
                  P=0.5, omega_0=60e-6, T_I=0,
-                 lambda_s_min=600e-9, lambda_s_max=1400e-9,
-                 theta_s_min=0, theta_s_max=0.07,
+                 lambda_s_min=625e-9, lambda_s_max=825e-9,
+                 theta_s_min=0, theta_s_max=0.6,
                  phi_s_min=0, phi_s_max=2*pi,
                  n_s_func=n_eff, n_s_1=n_x_KTP, n_s_2=n_x_KTP,
-                 n_i=n_eff, n_i_1=n_y_KTP, n_i_2=n_y_KTP,
-                 min_N_i=int(2**5), max_N_i=int(2**9), N_phi=int(2**5), grid_size=int(200),
+                 n_i_1=n_x_KTP, n_i_2=n_x_KTP,
+                 dn_i_1_dlambda=dn_x_KTP_dlambda, dn_i_2_dlambda=dn_x_KTP_dlambda,
+                 min_N_i=int(2**5), max_N_i=int(2**10), N_phi=int(2**5),
+                 grid_size=int(100), seed=None,
                  eps=1e-12, conv_check=100, min_rel_err=1e-2, min_abs_error=1e-21,
-                 signal_batch_size=20, n_conv=16):
+                 signal_batch_size=5, n_conv=16):
         #TODO: Make parameter database
 
         # -------- CRYSTAL --------
@@ -69,11 +70,17 @@ class SPDC():
         # -------- IDLER --------
         self.min_N_i = min_N_i  # minimal number of idler photons to simulate per signal photon
         self.max_N_i = max_N_i  # maximal number of idler photons to simulate per signal photon
-        self.n_i = n_i # function for calculating idler refractive index
         self.n_i_1 = n_i_1 # first refractive index that is contained in effective idler refractive index
         self.n_i_2 = n_i_2 # second refractive index that is contained in effective idler refractive index
+        self.dn_i_1_dlambda = dn_i_1_dlambda  # derivative of the first refractive index that is contained in effective idler refractive index
+        self.dn_i_2_dlambda = dn_i_2_dlambda  # derivative of the second refractive index that is contained in effective idler refractive index
 
         # -------- SIMULATION --------
+        # Generator seed
+        self.seed = seed
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+
         # Create sampling grid
         self.lambda_s_grid = np.linspace(self.lambda_s_min, self.lambda_s_max, self.grid_size)
         self.theta_s_grid = np.linspace(self.theta_s_min, self.theta_s_max, self.grid_size)
@@ -120,187 +127,8 @@ class SPDC():
         ]
 
     def get_transition_rate(self):
-        """
-        To calculate the transition rate of the SPDC source equation 2.67 from
-        is used.
-        :return:
-        """
-        # Calculate integral prefactor
-        const_rate_prefactor = (16 * self.omega_0**2 * self.P * self.L**2 * self.chi_eff**2
-                                / (epsilon_0 * c * self.n_p * (2 * pi)**8))
-
-        if self.m != 0:  # QPM exists
-            const_rate_prefactor /= self.m ** 2
-
-        if self.T_I == 0:  # CW pump case
-            const_rate_prefactor *= (2 * np.pi)
-        else:
-            const_rate_prefactor *= self.T_I
-
-        # Sample phi to completely define signal
-        phi_s = np.linspace(0, 2 * np.pi, self.N_phi, endpoint=False)
-
-        # Loop over signals and perform integration over phi and then also idlers
-        sum_val = np.zeros(self.N_s)
-        for s in tqdm(range(self.N_s)):
-            # Integrate over phi
-            phi_sum = 0.0
-            for phi in phi_s:
-                idler_sum = 0.0
-                idler_sum2 = 0.0
-
-                # Calculate signal components for this phi
-                k_sx, k_sy, k_sz = spherical_to_cartesian(self.k_s[s], self.theta_s[s], phi)
-
-                # Sample maximal numer of idlers
-                idler_sampler = qmc.Sobol(d=4, scramble=True)
-                idler_points = idler_sampler.random(self.max_N_i)
-
-                # Take smaller batches of sampled idlers
-                # (implementing adaptive stopping - we stop integration for this specific signal if
-                # relative or absolute error don't change by more than predefined limits)
-                max_loops = int((self.max_N_i - self.min_N_i) / self.conv_check) + 1
-                for i in range(max_loops):
-                    # Sample transversal momentum mismatch
-                    min_i = 0 if i == 0 else self.min_N_i + (i - 1) * self.conv_check
-                    max_i = self.min_N_i + i * self.conv_check
-                    delta_k_x = norm.ppf(idler_points[min_i:max_i, 0], loc=0, scale=self.gauss_scale)
-                    delta_k_y = norm.ppf(idler_points[min_i:max_i, 1], loc=0, scale=self.gauss_scale)
-
-                    # Calculate transversal idler momentum components
-                    k_ix = - delta_k_x - k_sx
-                    k_iy = - delta_k_y - k_sy
-                    k_i_normal = np.sqrt(k_ix ** 2 + k_iy ** 2)
-
-                    # Idler refraction index function
-                    n_i_func = lambda wavelength, theta_i: n_eff(self.n_i_1, self.n_i_2, wavelength, theta_i, self.t)
-
-                    if self.T_I == 0:
-                        # CW pump => force energy conservation
-                        w_i = self.w_p - self.w_s[s]
-                        delta_w = 0
-
-                        # Calculate idler wavelength
-                        lambda_i = 2 * pi * c / w_i
-
-                        # Solve for idler polar angle
-                        theta_i = get_theta_i_vectorized(k_i_normal, lambda_i, n_i_func)
-                        # ...and get idler refractive index and momentum
-                        n_i = n_i_func(lambda_i, theta_i)
-                        k_i = 2 * np.pi * n_i / lambda_i
-
-                        # Calculate longitudinal momentum from magnitude and transverse momenta
-                        k_iz2 = k_i ** 2 - k_ix ** 2 - k_iy ** 2
-                        # ...and check if this squared value is valid
-                        valid = (
-                                np.isfinite(k_iz2)
-                                & (k_iz2 >= 0)
-                                & np.isfinite(theta_i)
-                                & np.isfinite(n_i)
-                        )
-                        k_iz = np.full_like(k_iz2, np.nan)
-                        k_iz[valid] = np.sqrt(k_iz2[valid])
-                        # ...then get longitudinal momentum mismatch
-                        delta_k_z = np.full_like(k_iz2, np.nan)
-                        delta_k_z[valid] = self.k_p - k_sz - k_iz[valid] + self.k_m
-
-                        # calculate integrand function value
-                        # - calculate Jacobian = 1 / (d(omega) / d(k_iz))
-                        dk = 1e-5 * abs(k_iz)
-                        omega_plus = w_from_k_components(k_ix, k_iy, k_iz + dk, self.n_i_1, self.n_i_2, self.t, self.lambda_p)
-                        omega_minus = w_from_k_components(k_ix, k_iy, k_iz - dk, self.n_i_1, self.n_i_2, self.t, self.lambda_p)
-                        domega_dkiz = (omega_plus - omega_minus) / (2 * dk)
-                        jacobian = 1 / abs(domega_dkiz)
-                        # - calculate other prefactors
-                        signal_prefactor = (self.k_s[s] ** 4 * self.w_s[s] * np.sin(self.theta_s[s])) / (self.n_s[s] ** 2)
-                        idler_prefactor = jacobian * w_i / n_i ** 2
-                        gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
-                        sinc_k_z_term = (sinc_phys(delta_k_z * self.L / 2)) ** 2
-                        f_val = (const_rate_prefactor * signal_prefactor * idler_prefactor
-                                 * sinc_k_z_term * gauss_term)
-
-                        # get MC weight
-                        p_val = (norm.pdf(delta_k_x, loc=0, scale=self.gauss_scale)
-                                 * norm.pdf(delta_k_y, loc=0, scale=self.gauss_scale))
-
-                        valid &= (
-                                np.isfinite(f_val)
-                                & np.isfinite(p_val)
-                                & (p_val > 1e-300)
-                        )
-
-                    else:
-                        # Obtain longitudinal momentum mismatch by sampling sinc2 function
-                        sinc_arg_sampled = sample_sinc2(idler_points[min_i:max_i, 2:])
-                        delta_k_z = sinc_arg_sampled * 2 / self.L
-                        # ...and obtain longitudinal momentum component
-                        k_iz = self.k_p - k_sz - delta_k_z + self.k_m
-
-                        # Transform idler components in spherical coordinates
-                        k_i, theta_i, phi_i = cartesian_to_spherical(k_ix, k_iy, k_iz)
-
-                        # Calculate idler wavelength, refraction index and angular frequency
-                        lambda_i = get_lambda_i_vectorized(
-                            k_i,
-                            theta_i,
-                            self.n_i_1,
-                            self.n_i_2,
-                            self.t,
-                            self.lambda_p
-                        )
-                        n_i = n_i_func(lambda_i, theta_i)
-                        w_i = 2 * np.pi * c / lambda_i
-
-                        # Get energy mismatch
-                        delta_w = self.w_p - self.w_s[s] - w_i
-
-                        # Calculate integrand function value
-                        signal_prefactor = (self.k_s[s] ** 4 * self.w_s[s] * np.sin(self.theta_s[s])) / (self.n_s[s] ** 2)
-                        idler_prefactor = w_i / n_i ** 2
-                        gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
-                        sinc_k_z_term = (sinc_phys(sinc_arg_sampled)) ** 2
-                        sinc_omega_term = (sinc_phys(delta_w * self.T_I / 2)) ** 2
-                        f_val = (const_rate_prefactor * signal_prefactor * idler_prefactor
-                                 * sinc_k_z_term * gauss_term * sinc_omega_term)
-
-                        # Get MC weight
-                        p_val = (norm.pdf(delta_k_x, loc=0, scale=self.gauss_scale)
-                                 * norm.pdf(delta_k_y, loc=0, scale=self.gauss_scale)
-                                 * sinc2_approximation(sinc_arg_sampled) * self.L / 2)
-
-                        valid = (
-                                np.isfinite(f_val)
-                                & np.isfinite(p_val)
-                                & (p_val > 1e-300)
-                        )
-
-                    # Add to the MC sum
-                    weighted_val = np.zeros_like(f_val)
-                    weighted_val[valid] = f_val[valid] / p_val[valid]
-                    idler_sum += np.sum(weighted_val)
-                    idler_sum2 += np.sum(weighted_val**2)
-
-                    # Adaptive stopping criteria
-                    mean = idler_sum / max_i
-                    variance = np.maximum(0.0, (idler_sum2 / max_i - mean ** 2) / (max_i - 1))
-
-                    abs_err = np.sqrt(variance)
-                    rel_err = abs_err / (mean + self.eps)
-
-                    if i > 0 and (abs_err < self.min_abs_error or rel_err < self.min_rel_err):
-                        break
-
-                phi_sum += idler_sum / max_i
-
-            sum_val[s] += phi_sum
-
-        return sum_val / self.N_phi
-
-    def get_transition_rate_vectorized(self):
         # Loop over signals and perform integration over phi and then also idlers
         mc_val = []
-        seed = 42
-        rng = np.random.default_rng(seed)
         for (start, end) in tqdm(self.signal_batches):
             k_s_batch = self.k_s[start:end]
             w_s_batch = self.w_s[start:end]
@@ -314,16 +142,15 @@ class SPDC():
             k_sz = k_s_batch * np.cos(theta_batch)  # (signal_batch_size, ) - we don't store repeated values of k_sz!
 
             # Sample maximal numer of idlers
-
-            sobol_seed = rng.integers(0, 2 ** 32 - 1)
-
+            sobol_seed = self.rng.integers(0, 2 ** 32 - 1)
             idler_sampler = qmc.Sobol(
                 d=4,
                 scramble=True,
                 seed=int(sobol_seed)
             )
-
-            idler_points = idler_sampler.random(self.max_N_i)
+            idler_points = idler_sampler.random_base2(
+                m=int(np.log2(self.max_N_i))
+            )
 
             # Calculate transversal momentum mismatch
             # These two are equivalent:
@@ -342,6 +169,11 @@ class SPDC():
             # Generate all samples and calculate the weighted values for all 512 samples in one vectorized operation.
             # Idler refraction index function
             n_i_func = lambda wavelength, theta_i: n_eff(self.n_i_1, self.n_i_2, wavelength, theta_i, self.t)
+            d_n_i_dlambda_func = lambda wavelength, theta_i: (
+                dn_eff_dlambda(self.n_i_1, self.dn_i_1_dlambda,
+                               self.n_i_2, self.dn_i_2_dlambda,
+                               wavelength, theta_i, self.t)
+            )
 
             if self.T_I == 0:
                 # CW pump => force energy conservation
@@ -380,12 +212,13 @@ class SPDC():
                 delta_k_z[~valid] = np.nan
 
                 # calculate integrand function value
-                # - calculate Jacobian = 1 / (d(omega) / d(k_iz))
-                dk = 1e-5 * abs(k_iz)
-                omega_plus = w_from_k_components(k_ix, k_iy, k_iz + dk, self.n_i_1, self.n_i_2, self.t, self.lambda_p)
-                omega_minus = w_from_k_components(k_ix, k_iy, k_iz - dk, self.n_i_1, self.n_i_2, self.t, self.lambda_p)
-                domega_dkiz = (omega_plus - omega_minus) / (2 * dk)
-                jacobian = 1 / abs(domega_dkiz)
+                # - calculate Jacobian = 1 / (d(omega) / d(k_iz)) analytically
+                # k = 2 * pi * n(lambda, theta) / lambda
+                # fixed theta: dk/dlambda = 2 * pi * ((1 / lambda) * (dn/dlambda) - n / lambda**2)
+                # w = 2 * pi * c / lambda
+                # dw/dlambda = - 2 * pi * c / lambda**2
+                # => dw/dk = c / (n - lambda * dn/dlambda)
+                jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i) * (1 / np.abs(np.cos(theta_i)))) / c
                 # - calculate other prefactors
                 idler_prefactor = jacobian * w_i / n_i ** 2
                 gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
@@ -410,7 +243,7 @@ class SPDC():
                 sinc_arg_sampled = sample_sinc2(idler_points[:, 2:])
                 delta_k_z = sinc_arg_sampled * 2 / self.L
                 # ...and obtain longitudinal momentum component
-                k_iz = self.k_p - k_sz - delta_k_z + self.k_m
+                k_iz = self.k_p - k_sz[:, None, None] - delta_k_z[None, None, :] + self.k_m
 
                 # Transform idler components in spherical coordinates
                 k_i, theta_i, phi_i = cartesian_to_spherical(k_ix, k_iy, k_iz)
@@ -428,14 +261,14 @@ class SPDC():
                 w_i = 2 * np.pi * c / lambda_i
 
                 # Get energy mismatch
-                delta_w = self.w_p - w_s_batch - w_i
+                delta_w = self.w_p - w_s_batch[:, None, None] - w_i
 
-                # Calculate integrand function value
+                # Calculate other prefactors
                 idler_prefactor = w_i / n_i ** 2
                 gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
                 sinc_k_z_term = (sinc_phys(sinc_arg_sampled)) ** 2
                 sinc_omega_term = (sinc_phys(delta_w * self.T_I / 2)) ** 2
-                f_val = (self.const_rate_prefactor * signal_prefactor_batch * idler_prefactor
+                f_val = (self.const_rate_prefactor * signal_prefactor_batch[:, None, None] * idler_prefactor
                          * sinc_k_z_term * gauss_term * sinc_omega_term)
 
                 # Get MC weight
@@ -451,7 +284,6 @@ class SPDC():
 
             # Add to the MC sum
             weighted_val = np.zeros_like(f_val)
-
             weighted_val = np.divide(
                 f_val,
                 p_val,
@@ -462,11 +294,13 @@ class SPDC():
             # Adaptive stopping criteria
             cumsum = np.cumsum(weighted_val, axis=-1)
             cumsum2 = np.cumsum(weighted_val ** 2, axis=-1)
-            n = np.arange(1, self.max_N_i + 1)
-            mean = cumsum / n
+
+            # We have minimal number of samples we look at
+            n = np.arange(self.min_N_i, self.max_N_i + 1)
+            mean = cumsum[:, :, self.min_N_i-1:] / n
             variance = np.zeros_like(mean)
             np.divide(
-                cumsum2 - n * mean ** 2,
+                cumsum2[:, :, self.min_N_i-1:] - n * mean ** 2,
                 n - 1,
                 out=variance,
                 where=n > 1
@@ -490,15 +324,15 @@ class SPDC():
             ).all(axis=-1)
             has_convergence = np.any(runs, axis=-1)
             first_group = np.argmax(runs, axis=-1)
+            max_index = mean.shape[-1] - 1
             conv_index = np.where(
                 has_convergence,
                 np.minimum(
                     first_group + self.n_conv,
-                    self.max_N_i - 1
+                    max_index
                 ), # if it has converged we chose first index from the group we found
-                self.max_N_i - 1 # if it hasn't we just take maximum index
+                max_index # if it hasn't we just take maximum index
             )
-
             phi_integrals = np.take_along_axis(
                 mean,
                 conv_index[..., None],
@@ -520,8 +354,11 @@ class SPDC():
         :return:
         """
         # Initialize grid
-        l = np.asarray(self.lambda_s_grid).ravel()
-        t = np.asarray(self.theta_s_grid).ravel()
+        contour_grid_size = 500 # contour has more point by default, no matter how fine spectrum grid is
+        contour_lambda_grid = np.linspace(self.lambda_s_min, self.lambda_s_max, contour_grid_size)
+        contour_theta_grid = np.linspace(self.theta_s_min, self.theta_s_max, contour_grid_size)
+        l = np.asarray(contour_lambda_grid).ravel()
+        t = np.asarray(contour_theta_grid).ravel()
         lam, theta = np.meshgrid(l, t, indexing="xy")
 
         # Signal refractive index and wavevector (vectorized in the right shape)
@@ -543,7 +380,7 @@ class SPDC():
         theta_i = np.zeros_like(lambda_i)
         for _ in range(30):
             # Step 2: Compute idler refractive index with the current estimate...
-            n_i = self.n_i(self.n_i_1, self.n_i_2, lambda_i, theta_i, self.t)
+            n_i = n_eff(self.n_i_1, self.n_i_2, lambda_i, theta_i, self.t)
             # ... and from it the idler vector magnitude
             k_i = 2 * np.pi * n_i / lambda_i
 
@@ -556,7 +393,7 @@ class SPDC():
             theta_i[valid] = np.arcsin(sin_theta[valid])
 
         # Now recompute n_i and k_i with the final estimate...
-        n_i = self.n_i(self.n_i_1, self.n_i_2, lambda_i, theta_i, self.t)
+        n_i = n_eff(self.n_i_1, self.n_i_2, lambda_i, theta_i, self.t)
         k_i = 2 * np.pi * n_i / lambda_i
         # ...and evaluate longitudinal mismatch
         dkz = self.k_p + self.k_m - k_s * np.cos(theta) - k_i * np.cos(theta_i)
@@ -564,7 +401,7 @@ class SPDC():
         return lam, theta, dkz
 
     def plot_spectrum(self):
-        vals = self.get_transition_rate_vectorized()
+        vals = self.get_transition_rate()
         theta_deg = np.rad2deg(self.theta_s_grid) # convert theta to degrees
 
         # Plot spectrum
@@ -601,255 +438,6 @@ class SPDC():
         plt.ylabel(r"$\theta_s$ internal (deg)")
 
         plt.show()
-
-    def compare_theta_i_solvers(self, n_fixed_1=5, n_fixed_2=30):
-        """
-        Compare fixed-point iterations with a bracketing root solver for theta_i.
-
-        Plots the signal phase-matching contours Delta k_z = 0 obtained
-        from each theta_i solution method.
-        """
-
-        lam, theta_s = np.meshgrid(
-            self.lambda_s_grid,
-            self.theta_s_grid,
-            indexing="xy"
-        )
-
-        # Signal properties
-        n_s = self.n_s_func(
-            self.n_s_1,
-            self.n_s_2,
-            lam,
-            theta_s
-        )
-        k_s = 2 * np.pi * n_s / lam
-
-        # CW energy conservation:
-        # 1/lambda_i = 1/lambda_p - 1/lambda_s
-        lambda_i = np.full_like(lam, np.nan, dtype=float)
-
-        valid_energy = lam > self.lambda_p
-        lambda_i[valid_energy] = (
-                self.lambda_p * lam[valid_energy]
-                / (lam[valid_energy] - self.lambda_p)
-        )
-
-        def n_i_of(lambda_i_array, theta_i_array):
-            return self.n_i(
-                self.n_i_1,
-                self.n_i_2,
-                lambda_i_array,
-                theta_i_array,
-                self.t
-            )
-
-        def fixed_point_solution(n_iterations):
-            theta_i = np.zeros_like(lam)
-
-            for _ in range(n_iterations):
-                n_i = n_i_of(lambda_i, theta_i)
-                k_i = 2 * np.pi * n_i / lambda_i
-
-                sin_theta_i = k_s * np.sin(theta_s) / k_i
-
-                valid = (
-                        valid_energy
-                        & np.isfinite(sin_theta_i)
-                        & (np.abs(sin_theta_i) <= 1)
-                )
-
-                theta_next = np.full_like(theta_i, np.nan)
-                theta_next[valid] = np.arcsin(sin_theta_i[valid])
-
-                theta_i = theta_next
-
-            n_i = n_i_of(lambda_i, theta_i)
-            k_i = 2 * np.pi * n_i / lambda_i
-
-            dkz = self.k_p + self.k_m - (
-                    k_s * np.cos(theta_s)
-            ) - (
-                          k_i * np.cos(theta_i)
-                  )
-
-            dkz[~np.isfinite(dkz)] = np.nan
-
-            return theta_i, dkz
-
-        def root_solution():
-            theta_i = np.full_like(lam, np.nan, dtype=float)
-
-            for index in np.ndindex(lam.shape):
-                if not valid_energy[index]:
-                    continue
-
-                lambda_s_value = lam[index]
-                theta_s_value = theta_s[index]
-                lambda_i_value = lambda_i[index]
-                k_s_value = k_s[index]
-
-                def equation(theta_i_value):
-                    n_i_value = self.n_i(
-                        self.n_i_1,
-                        self.n_i_2,
-                        lambda_i_value,
-                        theta_i_value,
-                        self.t
-                    )
-                    k_i_value = 2 * np.pi * n_i_value / lambda_i_value
-
-                    return (
-                            k_i_value * np.sin(theta_i_value)
-                            - k_s_value * np.sin(theta_s_value)
-                    )
-
-                # Search only the forward hemisphere.
-                lower = 0.0
-                upper = np.pi / 2 - 1e-10
-
-                try:
-                    f_lower = equation(lower)
-                    f_upper = equation(upper)
-
-                    # A root exists only if the function changes sign.
-                    if np.isfinite(f_lower) and np.isfinite(f_upper):
-                        if f_lower * f_upper <= 0:
-                            theta_i[index] = brentq(
-                                equation,
-                                lower,
-                                upper,
-                                xtol=1e-12,
-                                rtol=1e-12,
-                                maxiter=100
-                            )
-
-                except (ValueError, RuntimeError, FloatingPointError):
-                    continue
-
-            n_i = n_i_of(lambda_i, theta_i)
-            k_i = 2 * np.pi * n_i / lambda_i
-
-            dkz = self.k_p + self.k_m - (
-                    k_s * np.cos(theta_s)
-            ) - (
-                          k_i * np.cos(theta_i)
-                  )
-
-            dkz[~np.isfinite(dkz)] = np.nan
-
-            return theta_i, dkz
-
-        # Solve with all three methods.
-        theta_i_fixed_1, dkz_fixed_1 = fixed_point_solution(n_fixed_1)
-        theta_i_fixed_2, dkz_fixed_2 = fixed_point_solution(n_fixed_2)
-        theta_i_root, dkz_root = root_solution()
-
-        # Plot phase matching contours.
-        plt.figure(figsize=(10, 6))
-
-
-
-        plt.contour(
-            lam * 1e9,
-            np.rad2deg(theta_s),
-            dkz_root,
-            levels=[0],
-            colors="lime",
-            linewidths=2.5,
-            linestyles="-"
-        )
-
-        plt.contour(
-            lam * 1e9,
-            np.rad2deg(theta_s),
-            dkz_fixed_2,
-            levels=[0],
-            colors="tab:blue",
-            linewidths=2,
-            linestyles="-."
-        )
-
-        plt.contour(
-            lam * 1e9,
-            np.rad2deg(theta_s),
-            dkz_fixed_1,
-            levels=[0],
-            colors="tab:red",
-            linewidths=2,
-            linestyles="--"
-        )
-
-
-
-        handles = [
-            mlines.Line2D(
-                [], [],
-                color="tab:red",
-                linestyle="--",
-                linewidth=2,
-                label=f"Fixed point: {n_fixed_1} iterations"
-            ),
-            mlines.Line2D(
-                [], [],
-                color="tab:blue",
-                linestyle="-.",
-                linewidth=2,
-                label=f"Fixed point: {n_fixed_2} iterations"
-            ),
-            mlines.Line2D(
-                [], [],
-                color="lime",
-                linestyle="-",
-                linewidth=2.5,
-                label="Brent root solver"
-            )
-        ]
-
-        plt.legend(handles=handles)
-        plt.xlabel(r"$\lambda_s$ (nm)")
-        plt.ylabel(r"$\theta_s$ internal (deg)")
-        plt.title(r"Comparison of $\theta_i$ solvers: $\Delta k_z = 0$")
-        plt.grid(alpha=0.25)
-        plt.tight_layout()
-        plt.show()
-
-        # Quantify agreement at pixels where both methods are valid.
-        valid_5 = np.isfinite(theta_i_fixed_1) & np.isfinite(theta_i_root)
-        valid_30 = np.isfinite(theta_i_fixed_2) & np.isfinite(theta_i_root)
-
-        if np.any(valid_5):
-            error_5 = np.abs(
-                theta_i_fixed_1[valid_5]
-                - theta_i_root[valid_5]
-            )
-            print(
-                f"{n_fixed_1} iterations: "
-                f"maximum |Δtheta_i| = {np.rad2deg(np.max(error_5)):.3e} deg, "
-                f"mean |Δtheta_i| = {np.rad2deg(np.mean(error_5)):.3e} deg"
-            )
-
-        if np.any(valid_30):
-            error_30 = np.abs(
-                theta_i_fixed_2[valid_30]
-                - theta_i_root[valid_30]
-            )
-            print(
-                f"{n_fixed_2} iterations: "
-                f"maximum |Δtheta_i| = {np.rad2deg(np.max(error_30)):.3e} deg, "
-                f"mean |Δtheta_i| = {np.rad2deg(np.mean(error_30)):.3e} deg"
-            )
-
-        return {
-            "lambda_s": lam,
-            "theta_s": theta_s,
-            "theta_i_fixed_5": theta_i_fixed_1,
-            "theta_i_fixed_30": theta_i_fixed_2,
-            "theta_i_root": theta_i_root,
-            "dkz_fixed_5": dkz_fixed_1,
-            "dkz_fixed_30": dkz_fixed_2,
-            "dkz_root": dkz_root,
-        }
 
 
 class Imaging():
