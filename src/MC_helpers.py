@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.stats import norm
+from scipy.special import ndtri
 
 def sample_sinc2(sobol_2):
     """
@@ -21,17 +22,21 @@ def sample_sinc2(sobol_2):
     peak = sobol_2[..., 0]  # picking which peak to sample from
     val = sobol_2[..., 1]  # sampling a value from the peak
     samples = np.zeros_like(val)
+    z = ndtri(val)
 
     # choose which peak to sample from
     # and then perform standard sampling from a Gaussian
     mask_left = (peak < p1)
-    samples[mask_left] = norm.ppf(val[mask_left], loc=-mu, scale=sigma_1)
+    # samples[mask_left] = norm.ppf(val[mask_left], loc=-mu, scale=sigma_1)
+    samples[mask_left] = -mu + sigma_1 * z[mask_left]
 
     mask_central = (peak >= p1) & (peak < p1 + p0)
-    samples[mask_central] = norm.ppf(val[mask_central], loc=0, scale=sigma_0)
+    # samples[mask_central] = norm.ppf(val[mask_central], loc=0, scale=sigma_0)
+    samples[mask_central] = sigma_0 * z[mask_central]
 
     mask_right = (peak >= p1 + p0)
-    samples[mask_right] = norm.ppf(val[mask_right], loc=mu, scale=sigma_1)
+    # samples[mask_right] = norm.ppf(val[mask_right], loc=mu, scale=sigma_1)
+    samples[mask_right] = mu + sigma_1 * z[mask_right]
 
     return samples
 
