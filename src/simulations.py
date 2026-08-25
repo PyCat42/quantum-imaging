@@ -18,7 +18,7 @@ class SPDC():
                  lambda_p=405e-9, n_p=n_x_KTP,
                  P=0.5, omega_0=60e-6, T_I=0,
                  lambda_s_min=625e-9, lambda_s_max=825e-9,
-                 theta_s_min=0, theta_s_max=0.6,
+                 theta_s_min=0, theta_s_max=0.06,
                  phi_s_min=0, phi_s_max=2*pi,
                  n_s_func=n_eff, n_s_1=n_x_KTP, n_s_2=n_x_KTP,
                  n_i_1=n_x_KTP, n_i_2=n_x_KTP,
@@ -142,11 +142,14 @@ class SPDC():
             k_sz = k_s_batch * np.cos(theta_batch)  # (signal_batch_size, ) - we don't store repeated values of k_sz!
 
             # Sample maximal numer of idlers
-            sobol_seed = self.rng.integers(0, 2 ** 32 - 1)
+            if self.seed is not None:
+                sobol_seed = int(self.rng.integers(0, 2 ** 32 - 1))
+            else:
+                sobol_seed = None
             idler_sampler = qmc.Sobol(
                 d=4,
                 scramble=True,
-                seed=int(sobol_seed)
+                seed=sobol_seed
             )
             idler_points = idler_sampler.random_base2(
                 m=int(np.log2(self.max_N_i))
