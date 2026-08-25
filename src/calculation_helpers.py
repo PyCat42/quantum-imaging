@@ -68,6 +68,63 @@ def get_theta_i(k_i_normal, lambda_i, n_i):
     vec_solution = np.vectorize(solve_single_k)
     return vec_solution(k_i_normal)
 
+def get_theta_i_vectorized(k_i_normal, lambda_i, n_i, n_iter=35):
+    """
+    Vectorized solution of
+
+        2*pi*n(lambda_i, theta_i)*sin(theta_i)/lambda_i
+            = k_i_normal
+
+    using simultaneous bisection for all array elements.
+    """
+
+    k_i_normal = np.asarray(k_i_normal)
+    lambda_i = np.asarray(lambda_i)
+
+    theta_lo = np.zeros_like(k_i_normal, dtype=np.float64)
+    theta_hi = np.full_like(k_i_normal, np.pi / 2, dtype=np.float64)
+
+    # First check which points actually have a solution.
+    f_lo = (
+        2 * np.pi
+        * n_i(lambda_i, theta_lo)
+        * np.sin(theta_lo)
+        / lambda_i
+        - k_i_normal
+    )
+
+    f_hi = (
+        2 * np.pi
+        * n_i(lambda_i, theta_hi)
+        * np.sin(theta_hi)
+        / lambda_i
+        - k_i_normal
+    )
+
+    valid = (f_lo <= 0) & (f_hi >= 0)
+
+    # Bisection
+    for _ in range(n_iter):
+        theta_mid = 0.5 * (theta_lo + theta_hi)
+
+        f_mid = (
+            2 * np.pi
+            * n_i(lambda_i, theta_mid)
+            * np.sin(theta_mid)
+            / lambda_i
+            - k_i_normal
+        )
+
+        below = f_mid < 0
+
+        theta_lo = np.where(below, theta_mid, theta_lo)
+        theta_hi = np.where(below, theta_hi, theta_mid)
+
+    theta = 0.5 * (theta_lo + theta_hi)
+    theta[~valid] = np.nan
+
+    return theta
+
 def solve_single_k_theta(single_k_i, single_theta_i, n_i_1, n_i_2, temp, lambda_p):
     """
     Numerically solving for idler wavelength when its wavevector and polar angle are known.
@@ -115,6 +172,62 @@ def get_lambda_i(k_i, theta_i, n_i_1, n_i_2, temp, lambda_p):
         for k, theta in zip(k_i, theta_i)
     ])
 
+def get_lambda_i_vectorized(
+    k_i,
+    theta_i,
+    n_i_1,
+    n_i_2,
+    temp,
+    lambda_p,
+    n_iter=40):
+    """
+    Vectorized solution of
+
+        2*pi*n_eff(lambda_i, theta_i)/lambda_i = k_i
+
+    using simultaneous bisection.
+    """
+
+    k_i = np.asarray(k_i)
+    theta_i = np.asarray(theta_i)
+
+    k_i, theta_i = np.broadcast_arrays(k_i, theta_i)
+
+    lo = np.full_like(k_i, lambda_p, dtype=np.float64)
+    hi = np.full_like(k_i, 10 * lambda_p, dtype=np.float64)
+
+    def k_from_lambda(wavelength):
+        n = n_eff(
+            n_i_1,
+            n_i_2,
+            wavelength,
+            theta_i,
+            temp
+        )
+        return 2 * np.pi * n / wavelength
+
+    k_lo = k_from_lambda(lo)
+    k_hi = k_from_lambda(hi)
+
+    # k(lambda) should decrease with lambda.
+    valid = (k_lo >= k_i) & (k_hi <= k_i)
+
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        k_mid = k_from_lambda(mid)
+
+        # k_mid > target -> wavelength needs to increase
+        too_large_k = k_mid > k_i
+
+        lo = np.where(too_large_k, mid, lo)
+        hi = np.where(too_large_k, hi, mid)
+
+    lambda_i = 0.5 * (lo + hi)
+    lambda_i[~valid] = np.nan
+
+    return lambda_i
+
+
 def w_from_k_components(k_ix, k_iy, k_iz, n_i_1, n_i_2, temp, lambda_p):
     """
     Calculates angular frequency when wavevector components are known.
@@ -134,6 +247,6 @@ def w_from_k_components(k_ix, k_iy, k_iz, n_i_1, n_i_2, temp, lambda_p):
         k_iz
     )
 
-    lambda_i = get_lambda_i(k_i, theta_i, n_i_1, n_i_2, temp, lambda_p)
+    lambda_i = get_lambda_i_vectorized(k_i, theta_i, n_i_1, n_i_2, temp, lambda_p)
 
     return 2 * np.pi * c / lambda_i
