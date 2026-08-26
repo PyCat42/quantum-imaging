@@ -5,6 +5,7 @@ from scipy.constants import c, pi, epsilon_0
 from scipy.stats import norm, qmc
 from scipy.special import ndtri
 from tqdm.auto import tqdm
+import multiprocessing as mp
 
 from src.sellmeier import *
 from src.calculation_helpers import *
@@ -14,7 +15,7 @@ class SPDC():
     """
     Class for simulation of SPDC source.
     """
-    def __init__(self, L=2e-3, t=25, period=5.32e-6, m=-1, chi_eff=6e-12,
+    def __init__(self, L=1e-3, t=25, period=5.335e-6, m=-1, chi_eff=6e-12,
                  lambda_p=405e-9, n_p=n_x_KTP,
                  P=0.5, omega_0=60e-6, T_I=0,
                  lambda_s_min=625e-9, lambda_s_max=825e-9,
@@ -23,10 +24,10 @@ class SPDC():
                  n_s_func=n_eff, n_s_1=n_x_KTP, n_s_2=n_x_KTP,
                  n_i_1=n_x_KTP, n_i_2=n_x_KTP,
                  dn_i_1_dlambda=dn_x_KTP_dlambda, dn_i_2_dlambda=dn_x_KTP_dlambda,
-                 min_N_i=int(2**5), max_N_i=int(2**10), N_phi=int(2**5),
-                 grid_size=int(100), seed=None,
+                 min_N_i=int(2**10), max_N_i=int(2**11), N_phi=int(2**5),
+                 grid_size=int(500), seed=None,
                  eps=1e-12, conv_check=100, min_rel_err=1e-2, min_abs_error=1e-21,
-                 signal_batch_size=5, n_conv=16):
+                 signal_batch_size=24, n_conv=16, n_processes=9):
         #TODO: Make parameter database
 
         # -------- CRYSTAL --------
@@ -125,6 +126,7 @@ class SPDC():
             (start, min(start + self.signal_batch_size, self.N_s))
             for start in range(0, self.N_s, self.signal_batch_size)
         ]
+        self.n_processes = n_processes
 
     def get_transition_rate(self):
         # Loop over signals and perform integration over phi and then also idlers
@@ -348,8 +350,264 @@ class SPDC():
 
         return np.concatenate(mc_val)
 
+    def get_transition_rate_batch(self, args):
+        batch_index, start, end, sobol_seed = args
+
+        # One worker works on one signal batch
+        k_s_batch = self.k_s[start:end]
+        w_s_batch = self.w_s[start:end]
+        theta_batch = self.theta_s[start:end]
+        sin_theta = np.sin(theta_batch)[:, None]
+        signal_prefactor_batch = self.signal_prefactor[start:end]
+
+        # Spherical to cartesian - faster than calling function lots of times
+        k_sx = k_s_batch[:, None] * sin_theta * self.cos_phi[None, :]  # (signal_batch_size, N_phi)
+        k_sy = k_s_batch[:, None] * sin_theta * self.sin_phi[None, :]  # (signal_batch_size, N_phi)
+        k_sz = k_s_batch * np.cos(theta_batch)  # (signal_batch_size, ) - we don't store repeated values of k_sz!
+
+        # Sample maximal numer of idlers
+        if self.seed is not None:
+            sobol_seed = int(self.rng.integers(0, 2 ** 32 - 1))
+        else:
+            sobol_seed = None
+        idler_sampler = qmc.Sobol(
+            d=4,
+            scramble=True,
+            seed=sobol_seed
+        )
+        idler_points = idler_sampler.random_base2(
+            m=int(np.log2(self.max_N_i))
+        )
+
+        # Calculate transversal momentum mismatch
+        # These two are equivalent:
+        # x = norm.ppf(val, loc=mu, scale=sigma)
+        # x = mu + sigma * ndtri(val)
+        # ndtri is the inverse standard normal CDF and is much faster to calculate
+        delta_k_x = self.gauss_scale * ndtri(idler_points[:, 0])[None, None, :]  # (1, 1, max_N_i)
+        delta_k_y = self.gauss_scale * ndtri(idler_points[:, 1])[None, None, :]  # (1, 1, max_N_i)
+
+        # Calculate transversal idler momentum components
+        k_ix = - delta_k_x - k_sx[:, :, None]
+        k_iy = - delta_k_y - k_sy[:, :, None]
+        k_i_normal = np.sqrt(k_ix ** 2 + k_iy ** 2)
+
+        # Retain adaptive stopping without processing one batch at a time (i.e. eliminate idler loop)
+        # Generate all samples and calculate the weighted values for all 512 samples in one vectorized operation.
+        # Idler refraction index function
+        n_i_func = lambda wavelength, theta_i: n_eff(self.n_i_1, self.n_i_2, wavelength, theta_i, self.t)
+        d_n_i_dlambda_func = lambda wavelength, theta_i: (
+            dn_eff_dlambda(self.n_i_1, self.dn_i_1_dlambda,
+                           self.n_i_2, self.dn_i_2_dlambda,
+                           wavelength, theta_i, self.t)
+        )
+
+        if self.T_I == 0:
+            # CW pump => force energy conservation
+            w_i = (self.w_p - w_s_batch)[:, None, None]
+            delta_w = 0
+
+            # Calculate idler wavelength
+            lambda_i = 2 * pi * c / w_i
+
+            # Solve for idler polar angle
+            theta_i = get_theta_i_vectorized(k_i_normal, lambda_i, n_i_func)
+            # ...and get idler refractive index and momentum
+            n_i = n_i_func(lambda_i, theta_i)
+            k_i = 2 * np.pi * n_i / lambda_i
+
+            # Calculate longitudinal momentum from magnitude and transverse momenta
+            k_iz2 = k_i ** 2 - k_ix ** 2 - k_iy ** 2
+            # ...and check if this squared value is valid
+            valid = (
+                    np.isfinite(k_iz2)
+                    & (k_iz2 >= 0)
+                    & np.isfinite(theta_i)
+                    & np.isfinite(n_i)
+            )
+            k_iz = np.full_like(k_iz2, np.nan)
+            k_iz[valid] = np.sqrt(k_iz2[valid])
+            # ...then get longitudinal momentum mismatch
+            delta_k_z = np.full_like(k_iz2, np.nan)
+            delta_k_z = (
+                    self.k_p
+                    - k_sz[:, None, None]
+                    - k_iz
+                    + self.k_m
+            )
+
+            delta_k_z[~valid] = np.nan
+
+            # calculate integrand function value
+            # - calculate Jacobian = 1 / (d(omega) / d(k_iz)) analytically
+            # k = 2 * pi * n(lambda, theta) / lambda
+            # fixed theta: dk/dlambda = 2 * pi * ((1 / lambda) * (dn/dlambda) - n / lambda**2)
+            # w = 2 * pi * c / lambda
+            # dw/dlambda = - 2 * pi * c / lambda**2
+            # => dw/dk = c / (n - lambda * dn/dlambda)
+            jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i) * (1 / np.abs(np.cos(theta_i)))) / c
+            # - calculate other prefactors
+            idler_prefactor = jacobian * w_i / n_i ** 2
+            gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
+            sinc_k_z_term = (sinc_phys(delta_k_z * self.L / 2)) ** 2
+            f_val = (self.const_rate_prefactor * (signal_prefactor_batch)[:, None, None] * idler_prefactor
+                     * sinc_k_z_term * gauss_term)
+
+            # get MC weight
+            p_val = (
+                    norm.pdf(delta_k_x, loc=0, scale=self.gauss_scale)
+                    * norm.pdf(delta_k_y, loc=0, scale=self.gauss_scale)
+            )
+
+            valid &= (
+                    np.isfinite(f_val)
+                    & np.isfinite(p_val)
+                    & (p_val > 1e-300)
+            )
+
+        else:
+            # Obtain longitudinal momentum mismatch by sampling sinc2 function
+            sinc_arg_sampled = sample_sinc2(idler_points[:, 2:])
+            delta_k_z = sinc_arg_sampled * 2 / self.L
+            # ...and obtain longitudinal momentum component
+            k_iz = self.k_p - k_sz[:, None, None] - delta_k_z[None, None, :] + self.k_m
+
+            # Transform idler components in spherical coordinates
+            k_i, theta_i, phi_i = cartesian_to_spherical(k_ix, k_iy, k_iz)
+
+            # Calculate idler wavelength, refraction index and angular frequency
+            lambda_i = get_lambda_i_vectorized(
+                k_i,
+                theta_i,
+                self.n_i_1,
+                self.n_i_2,
+                self.t,
+                self.lambda_p
+            )
+            n_i = n_i_func(lambda_i, theta_i)
+            w_i = 2 * np.pi * c / lambda_i
+
+            # Get energy mismatch
+            delta_w = self.w_p - w_s_batch[:, None, None] - w_i
+
+            # Calculate other prefactors
+            idler_prefactor = w_i / n_i ** 2
+            gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
+            sinc_k_z_term = (sinc_phys(sinc_arg_sampled)) ** 2
+            sinc_omega_term = (sinc_phys(delta_w * self.T_I / 2)) ** 2
+            f_val = (self.const_rate_prefactor * signal_prefactor_batch[:, None, None] * idler_prefactor
+                     * sinc_k_z_term * gauss_term * sinc_omega_term)
+
+            # Get MC weight
+            p_val = (norm.pdf(delta_k_x, loc=0, scale=self.gauss_scale)
+                     * norm.pdf(delta_k_y, loc=0, scale=self.gauss_scale)
+                     * sinc2_approximation(sinc_arg_sampled) * self.L / 2)
+
+            valid = (
+                    np.isfinite(f_val)
+                    & np.isfinite(p_val)
+                    & (p_val > 1e-300)
+            )
+
+        # Add to the MC sum
+        weighted_val = np.zeros_like(f_val)
+        weighted_val = np.divide(
+            f_val,
+            p_val,
+            out=weighted_val,
+            where=valid
+        )
+
+        # Adaptive stopping criteria
+        cumsum = np.cumsum(weighted_val, axis=-1)
+        cumsum2 = np.cumsum(weighted_val ** 2, axis=-1)
+
+        # We have minimal number of samples we look at
+        n = np.arange(self.min_N_i, self.max_N_i + 1)
+        mean = cumsum[:, :, self.min_N_i - 1:] / n
+        variance = np.zeros_like(mean)
+        np.divide(
+            cumsum2[:, :, self.min_N_i - 1:] - n * mean ** 2,
+            n - 1,
+            out=variance,
+            where=n > 1
+        )
+        variance = np.maximum(variance, 0.0)
+
+        abs_err = np.sqrt(variance / n)
+        rel_err = abs_err / (mean + self.eps)
+
+        # When either absolute or relative error drops low enough we have convergence
+        converged = (
+                (abs_err < self.min_abs_error)
+                | (rel_err < self.min_rel_err)
+        )
+
+        # We look for group of n_conv consecutively converged samples
+        runs = sliding_window_view(
+            converged,
+            window_shape=self.n_conv,
+            axis=-1
+        ).all(axis=-1)
+        has_convergence = np.any(runs, axis=-1)
+        first_group = np.argmax(runs, axis=-1)
+        max_index = mean.shape[-1] - 1
+        conv_index = np.where(
+            has_convergence,
+            np.minimum(
+                first_group + self.n_conv,
+                max_index
+            ),  # if it has converged we chose first index from the group we found
+            max_index  # if it hasn't we just take maximum index
+        )
+        phi_integrals = np.take_along_axis(
+            mean,
+            conv_index[..., None],
+            axis=-1
+        )[..., 0]
+
+        signal_integrals = np.mean(phi_integrals, axis=1)
+
+        return batch_index, signal_integrals
+
     def get_transition_rate_parallel(self):
-        return
+        n_batches = len(self.signal_batches)
+
+        # Generate seeds ONLY in the parent process.
+        if self.seed is not None:
+            sobol_seeds = [
+                int(self.rng.integers(0, 2 ** 32 - 1))
+                for _ in range(n_batches)
+            ]
+        else:
+            sobol_seeds = [None] * n_batches
+
+        tasks = [
+            (
+                batch_index,
+                start,
+                end,
+                sobol_seeds[batch_index],
+            )
+            for batch_index, (start, end)
+            in enumerate(self.signal_batches)
+        ]
+
+        results = [None] * n_batches
+
+        with mp.Pool(processes=self.n_processes) as pool:
+
+            for batch_index, signal_integrals in tqdm(
+                    pool.imap_unordered(
+                        self.get_transition_rate_batch,
+                        tasks,
+                    ),
+                    total=n_batches,
+                    desc="Signal batches",
+            ):
+                results[batch_index] = signal_integrals
+
+        return np.concatenate(results)
 
     def get_phase_matching_contour(self):
         """
@@ -404,7 +662,10 @@ class SPDC():
         return lam, theta, dkz
 
     def plot_spectrum(self):
-        vals = self.get_transition_rate()
+        if self.n_processes is not None:
+            vals = self.get_transition_rate_parallel()
+        else:
+            vals = self.get_transition_rate()
         theta_deg = np.rad2deg(self.theta_s_grid) # convert theta to degrees
 
         # Plot spectrum
