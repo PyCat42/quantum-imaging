@@ -21,6 +21,13 @@ class ImagingSystem(ABC):
         # Each class that inherits this one needs to define its own transfer matrices!
 
     @abstractmethod
+    def magnification(self):
+        """
+        Return the magnification of the imaging system.
+        :return:
+        """
+
+    @abstractmethod
     def build_idler_matrix(self) -> np.ndarray:
         """
         Return the 2x2 ray-transfer matrix from the crystal
@@ -98,8 +105,9 @@ class ImagingSystem(ABC):
         )
 
 class Michaelson(ImagingSystem):
-    def __init__(self, f_i=0.2, f_d=0.15, ft_1=0.15, ft_2=0.05):
+    def __init__(self, source, f_i=0.2, f_d=0.15, ft_1=0.15, ft_2=0.05):
         super().__init__()
+        self.source = source
         self.f_i = f_i
         self.f_d = f_d
         self.ft_1 = ft_1
@@ -108,6 +116,11 @@ class Michaelson(ImagingSystem):
         # Build specific transfer matrices for this system
         self.M_idler = self.build_idler_matrix()
         self.M_detector = self.build_detector_matrix()
+
+    def magnification(self):
+        mag_interf = (self.f_d * self.source.lambda_s_central) / (self.f_i * self.source.lambda_i_central)
+        mag_telescope = self.ft_2 / self.ft_1
+        return mag_interf * mag_telescope
 
     def build_idler_matrix(self):
         """
