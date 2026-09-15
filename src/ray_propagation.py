@@ -42,8 +42,19 @@ def medium_to_air(lambda_med, theta_med, n):
     def medium_to_air_single(lambda_med_single, theta_med_single):
         objective = lambda lambda_vac: lambda_vac / n(lambda_vac, theta_med_single) - lambda_med_single
 
-        # n > 1 => lambda_vac > lambda_med
-        lambda_vac_solution = brentq(objective, lambda_med_single, 10 * lambda_med_single)
+        a = 0.1 * lambda_med_single
+        b = 10 * lambda_med_single
+
+        f_a = objective(a)
+        f_b = objective(b)
+
+        if f_a * f_b > 0:
+            return np.nan
+
+        try:
+            lambda_vac_solution = brentq(objective, a, b)
+        except ValueError:
+            lambda_vac_solution = np.nan
 
         # use Snell's law to retrieve theta_vac
         theta_vac_solution = np.arcsin(n(lambda_vac_solution, theta_med_single) * np.sin(theta_med_single))
