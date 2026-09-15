@@ -1,7 +1,5 @@
-import matplotlib.pyplot as plt
-import matplotlib.lines as mlines
 from numpy.lib._stride_tricks_impl import sliding_window_view
-from scipy.constants import c, pi, epsilon_0
+from scipy.constants import pi, epsilon_0
 from scipy.signal import fftconvolve
 from scipy.stats import norm, qmc
 from scipy.special import ndtri
@@ -21,12 +19,13 @@ class SPDC():
     def __init__(self, L=1e-3, t=25, period=5.335e-6, m=-1, chi_eff=6e-12,
                  lambda_p=405e-9, n_p=n_x_KTP,
                  P=0.5, omega_0=60e-6, T_I=0,
-                 lambda_s_min=625e-9, lambda_s_max=825e-9,
+                 lambda_s_min=625e-9, lambda_s_max=845e-9, lambda_s_central = 842e-9,
                  theta_s_min=0, theta_s_max=0.06,
                  phi_s_min=0, phi_s_max=2*pi,
-                 n_s_func=n_eff, n_s_1=n_x_KTP, n_s_2=n_x_KTP,
+                 n_s_1=n_x_KTP, n_s_2=n_x_KTP,
+                 dn_s_1_dlambda=dn_x_KTP_dlambda, dn_s_2_dlambda=dn_x_KTP_dlambda,
+                 lambda_i_central = 780e-9,
                  n_i_1=n_x_KTP, n_i_2=n_x_KTP,
-                 dn_i_1_dlambda=dn_x_KTP_dlambda, dn_i_2_dlambda=dn_x_KTP_dlambda,
                  min_N_i=int(2**5), max_N_i=int(2**10), N_phi=int(2**5),
                  grid_size=int(100), seed=None,
                  eps=1e-12, conv_check=100, min_rel_err=1e-2, min_abs_error=1e-21,
@@ -62,22 +61,23 @@ class SPDC():
         self.N_s = self.grid_size ** 2 # number of signal photons to simulate
         self.lambda_s_min = lambda_s_min # minimal value of signal wavelength
         self.lambda_s_max = lambda_s_max # maximal value of signal wavelength
+        self.lambda_s_central = lambda_s_central # central signal wavelength
         self.theta_s_min = theta_s_min # minimal value of signal polar angle
         self.theta_s_max = theta_s_max # maximal value of signal polar angle
         self.N_phi = N_phi  # number of phi angles sampled for each signal sample
         self.phi_s_min = phi_s_min  # minimal value of signal azimuthal angle
         self.phi_s_max = phi_s_max  # maximal value of signal azimuthal angle
-        self.n_s_func = n_s_func # function for calculating signal refractive index
         self.n_s_1 = n_s_1 # first refractive index that is contained in effective signal refractive index
         self.n_s_2 = n_s_2 # second refractive index that is contained in effective signal refractive index
+        self.dn_s_1_dlambda = dn_s_1_dlambda  # derivative of the first refractive index that is contained in effective signal refractive index
+        self.dn_s_2_dlambda = dn_s_2_dlambda  # derivative of the second refractive index that is contained in effective signal refractive index
 
         # -------- IDLER --------
         self.min_N_i = min_N_i  # minimal number of idler photons to simulate per signal photon
         self.max_N_i = max_N_i  # maximal number of idler photons to simulate per signal photon
+        self.lambda_i_central = lambda_i_central  # central idler wavelength
         self.n_i_1 = n_i_1 # first refractive index that is contained in effective idler refractive index
         self.n_i_2 = n_i_2 # second refractive index that is contained in effective idler refractive index
-        self.dn_i_1_dlambda = dn_i_1_dlambda  # derivative of the first refractive index that is contained in effective idler refractive index
-        self.dn_i_2_dlambda = dn_i_2_dlambda  # derivative of the second refractive index that is contained in effective idler refractive index
 
         # -------- SIMULATION --------
         # Generator seed
@@ -86,14 +86,25 @@ class SPDC():
             self.rng = np.random.default_rng(seed)
 
         # Create sampling grid
-        self.lambda_s_grid = np.linspace(self.lambda_s_min, self.lambda_s_max, self.grid_size)
-        self.theta_s_grid = np.linspace(self.theta_s_min, self.theta_s_max, self.grid_size)
+        self.u_lambda = (np.arange(self.grid_size) + 0.5) / self.grid_size
+        self.u_theta = (np.arange(self.grid_size) + 0.5) / self.grid_size
+
+        self.lambda_s_grid = self.lambda_s_min + self.u_lambda * (self.lambda_s_max - self.lambda_s_min)
+        self.theta_s_grid = self.theta_s_min + self.u_theta * (self.theta_s_max - self.theta_s_min)
+
         self.lambda_mesh, self.theta_mesh = np.meshgrid(self.lambda_s_grid, self.theta_s_grid)
         self.lambda_s = self.lambda_mesh.flatten()
         self.theta_s = self.theta_mesh.flatten()
 
+        """
+        # ... or uniform sampling
+        u = (np.arange(self.grid_size) + 0.5) / self.grid_size
+        u_max = np.sin(self.theta_s_max) ** 2
+        self.theta_s_grid = np.arcsin(np.sqrt(u * u_max))
+        """
+
         # Calculate signal params on grid
-        self.n_s = self.n_s_func(self.n_s_1, self.n_s_2, self.lambda_s, self.theta_s, self.t) # signal refractive index
+        self.n_s = n_eff(self.n_s_1, self.n_s_2, self.lambda_s, self.theta_s, self.t) # signal refractive index
         self.k_s = 2 * np.pi * self.n_s / self.lambda_s # signal wavevector
         self.w_s = 2 * np.pi * c / self.lambda_s # signal angular frequency
 
@@ -112,7 +123,13 @@ class SPDC():
         self.signal_prefactor = self.k_s ** 4 * self.w_s * np.sin(self.theta_s) / self.n_s ** 2
 
         # - phi
-        self.phi_s = np.linspace(self.phi_s_min, self.phi_s_max, self.N_phi, endpoint=False)
+        #self.phi_s = np.linspace(self.phi_s_min, self.phi_s_max, self.N_phi, endpoint=False)
+        self.phi_s = (
+                self.phi_s_min
+                + (np.arange(self.N_phi) + 0.5)
+                * (self.phi_s_max - self.phi_s_min)
+                / self.N_phi
+        )
         self.sin_phi = np.sin(self.phi_s)
         self.cos_phi = np.cos(self.phi_s)
 
@@ -123,13 +140,14 @@ class SPDC():
         self.min_rel_err = min_rel_err  # minimal change in relative dR error that is considered as such
         self.min_abs_error = min_abs_error  # minimal absolute change in dR that is considered as such
 
-        # Paralelization
+        # Parallelization
         self.signal_batch_size = signal_batch_size # number of signal samples that are run on the same process
         self.signal_batches = [
             (start, min(start + self.signal_batch_size, self.N_s))
             for start in range(0, self.N_s, self.signal_batch_size)
         ]
         self.n_processes = n_processes
+
 
     def get_transition_rate(self):
         # Loop over signals and perform integration over phi and then also idlers
@@ -511,6 +529,297 @@ class SPDC():
 
         return f_val, p_val, valid, lambda_i, theta_i, phi_i
 
+    def target_sampler(self, lambda_s, theta_s=0.0, phi_s=0.0, N_i=None, sobol_seed=None, kernel_only=False):
+        n_s = self.n_s_func(self.n_s_1, self.n_s_2, lambda_s, theta_s, self.t)
+
+        k_s = 2 * np.pi * n_s / lambda_s
+        w_s = 2 * np.pi * c / lambda_s
+
+        k_sx = k_s * np.sin(theta_s) * np.cos(phi_s)
+        k_sy = k_s * np.sin(theta_s) * np.sin(phi_s)
+        k_sz = k_s * np.cos(theta_s)
+
+        # Sample maximal numer of idlers
+        if N_i is None:
+            N_i = self.max_N_i
+        idler_sampler = qmc.Sobol(
+            d=4,
+            scramble=True,
+            seed=sobol_seed
+        )
+        idler_points = idler_sampler.random_base2(
+            m=int(np.log2(N_i))
+        )
+
+        # Calculate transversal momentum mismatch
+        delta_k_x = self.gauss_scale * ndtri(idler_points[:, 0])
+        delta_k_y = self.gauss_scale * ndtri(idler_points[:, 1])
+
+        # Calculate transversal idler momentum components
+        k_ix = -delta_k_x - k_sx
+        k_iy = -delta_k_y - k_sy
+        k_i_normal = np.hypot(k_ix, k_iy)
+
+        # Retain adaptive stopping without processing one batch at a time (i.e. eliminate idler loop)
+        # Generate all samples and calculate the weighted values for all 512 samples in one vectorized operation.
+        # Idler refraction index function
+        n_i_func = lambda wavelength, theta_i: n_eff(self.n_i_1, self.n_i_2, wavelength, theta_i, self.t)
+        d_n_i_dlambda_func = lambda wavelength, theta_i: (
+            dn_eff_dlambda(self.n_i_1, self.dn_i_1_dlambda,
+                           self.n_i_2, self.dn_i_2_dlambda,
+                           wavelength, theta_i, self.t)
+        )
+
+        # Any multiplicative factor depending only on the fixed signal state cancels
+        # That means that in this version we do not use self.const_rate_prefactor and self.signal_prefactor
+        if self.T_I == 0:
+            # CW pump => force energy conservation
+            w_i = self.w_p - w_s
+            lambda_i = 2 * np.pi * c / w_i
+
+            # Solve for idler polar angle
+            theta_i = get_theta_i_vectorized(k_i_normal, lambda_i, n_i_func)
+            # ...and get idler refractive index and momentum
+            n_i = n_i_func(lambda_i, theta_i)
+            k_i = 2 * np.pi * n_i / lambda_i
+
+            # Calculate longitudinal momentum from magnitude and transverse momenta
+            k_iz2 = k_i ** 2 - k_ix ** 2 - k_iy ** 2
+            # ...and check if this squared value is valid
+            valid = (
+                    np.isfinite(k_iz2)
+                    & (k_iz2 >= 0)
+                    & np.isfinite(theta_i)
+                    & np.isfinite(n_i)
+            )
+            k_iz = np.full_like(k_iz2, np.nan)
+            k_iz[valid] = np.sqrt(k_iz2[valid])
+            _, _, phi_i = cartesian_to_spherical(k_ix, k_iy, k_iz)
+            # ...then get longitudinal momentum mismatch
+            delta_k_z = np.full_like(k_iz2, np.nan)
+            delta_k_z = self.k_p - k_sz - k_iz + self.k_m
+            delta_k_z[~valid] = np.nan
+
+            # calculate integrand function value
+            # - calculate Jacobian = 1 / (d(omega) / d(k_iz)) analytically
+            # k = 2 * pi * n(lambda, theta) / lambda
+            # fixed theta: dk/dlambda = 2 * pi * ((1 / lambda) * (dn/dlambda) - n / lambda**2)
+            # w = 2 * pi * c / lambda
+            # dw/dlambda = - 2 * pi * c / lambda**2
+            # => dw/dk = c / (n - lambda * dn/dlambda)
+            jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i) * (1 / np.abs(np.cos(theta_i)))) / c
+            # - calculate other prefactors
+            idler_prefactor = jacobian * w_i / n_i ** 2
+            gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
+            sinc_k_z_term = (sinc_phys(delta_k_z * self.L / 2)) ** 2
+            f_val = idler_prefactor * sinc_k_z_term * gauss_term
+
+            # get MC weight
+            p_val = (
+                    norm.pdf(delta_k_x, loc=0, scale=self.gauss_scale)
+                    * norm.pdf(delta_k_y, loc=0, scale=self.gauss_scale)
+            )
+
+            valid &= (
+                    np.isfinite(f_val)
+                    & np.isfinite(p_val)
+                    & (p_val > 1e-300)
+            )
+
+        else:
+            # Obtain longitudinal momentum mismatch by sampling sinc2 function
+            sinc_arg_sampled = sample_sinc2(idler_points[:, 2:])
+            delta_k_z = sinc_arg_sampled * 2 / self.L
+            # ...and obtain longitudinal momentum component
+            k_iz = self.k_p - k_sz - delta_k_z + self.k_m
+
+            # Transform idler components in spherical coordinates
+            k_i, theta_i, phi_i = cartesian_to_spherical(k_ix, k_iy, k_iz)
+
+            # Calculate idler wavelength, refraction index and angular frequency
+            lambda_i = get_lambda_i_vectorized(
+                k_i,
+                theta_i,
+                self.n_i_1,
+                self.n_i_2,
+                self.t,
+                self.lambda_p
+            )
+            n_i = n_i_func(lambda_i, theta_i)
+            w_i = 2 * np.pi * c / lambda_i
+
+            # Get energy mismatch
+            delta_w = self.w_p - w_s - w_i
+
+            # Calculate other prefactors
+            idler_prefactor = w_i / n_i ** 2
+            gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
+            sinc_k_z_term = (sinc_phys(sinc_arg_sampled)) ** 2
+            sinc_omega_term = (sinc_phys(delta_w * self.T_I / 2)) ** 2
+            f_val = idler_prefactor * sinc_k_z_term * gauss_term * sinc_omega_term
+
+            # Get MC weight
+            p_val = (norm.pdf(delta_k_x, loc=0, scale=self.gauss_scale)
+                     * norm.pdf(delta_k_y, loc=0, scale=self.gauss_scale)
+                     * sinc2_approximation(sinc_arg_sampled) * self.L / 2)
+
+            valid = (
+                    np.isfinite(f_val)
+                    & np.isfinite(p_val)
+                    & (p_val > 1e-300)
+            )
+
+        if not kernel_only:
+            signal_prefactor = k_s ** 4 * w_s * np.sin(theta_s) / n_s ** 2
+            f_val *= (self.const_rate_prefactor * signal_prefactor)
+
+        return f_val, p_val, valid, lambda_i, theta_i, phi_i
+
+    def phase_matched_wavelength_guess(
+            self,
+            theta_target=0.0,
+            contour_grid_size=2000,
+    ):
+        # Get rough estimate on where dk_z = 0 for given theta
+        lam, theta, dkz = self.get_phase_matching_contour(
+            contour_grid_size=contour_grid_size,
+        )
+
+        theta_values = theta[:, 0]
+        # Find theta closest to target
+        theta_index = np.argmin(
+            np.abs(theta_values - theta_target)
+        )
+
+        # extract lambda and delta_k rows for this theta
+        lam_row = lam[theta_index, :]
+        dkz_row = dkz[theta_index, :]
+
+        branch_mask = (
+                np.isfinite(dkz_row)
+                & (lam_row < 2 * self.lambda_p)
+        )
+        if not np.any(branch_mask):
+            raise RuntimeError(
+                "No valid phase-matching points were found "
+                "at the requested theta_target."
+            )
+
+        valid_indices = np.flatnonzero(branch_mask)
+
+        # Use index where dk_z is minimal
+        minimum_index = valid_indices[
+            np.argmin(np.abs(dkz_row[branch_mask]))
+        ]
+
+        lambda_guess = lam_row[minimum_index]
+        dkz_at_guess = dkz_row[minimum_index]
+        theta_used = theta_values[theta_index]
+
+        return lambda_guess, theta_used, dkz_at_guess, lam_row, dkz_row
+
+    def get_phase_matching_peak(
+            self,
+            theta_target=0.0,
+            contour_grid_size=1000,
+            coarse_points=61,
+            fine_points=101,
+            N_i=2 ** 12,
+            seed=None,
+    ):
+        """
+        Refine a phase-matching wavelength estimate by maximizing
+        the numerical transition-rate estimate.
+        """
+        lambda_guess, theta, *_ = self.phase_matched_wavelength_guess(
+            theta_target=theta_target, contour_grid_size=contour_grid_size
+        )
+        half_width_theta = self.theta_s_min + 0.5 * (self.theta_s_max - self.theta_s_min) / self.grid_size
+        if theta_target == 0.0:
+            theta_target += half_width_theta
+
+        half_width_lambda = self.lambda_s_min + 0.5 * (self.lambda_s_max - self.lambda_s_min) / self.grid_size
+        lambda_lo = max(
+            self.lambda_s_min,
+            lambda_guess - half_width_lambda,
+        )
+        lambda_hi = min(
+            self.lambda_s_max,
+            lambda_guess + half_width_lambda,
+        )
+
+        if lambda_lo >= lambda_hi:
+            raise ValueError(
+                "Invalid wavelength refinement interval."
+            )
+
+        rng = np.random.default_rng(seed)
+
+        def estimate_rate(lambda_s):
+            local_seed = int(
+                rng.integers(0, 2 ** 32 - 1)
+            )
+
+            f_val, p_val, valid, *_ = self.target_sampler(
+                lambda_s=lambda_s,
+                theta_s=theta_target,
+                phi_s=0.0,
+                N_i=N_i,
+                sobol_seed=local_seed,
+                kernel_only=False,
+            )
+
+            weighted_val = np.divide(
+                f_val,
+                p_val,
+                out=np.zeros_like(f_val),
+                where=valid,
+            )
+
+            return np.mean(weighted_val)
+
+        lambda_coarse = np.linspace(
+            lambda_lo,
+            lambda_hi,
+            coarse_points,
+        )
+
+        rates_coarse = np.array([
+            estimate_rate(lambda_s)
+            for lambda_s in lambda_coarse
+        ])
+
+        i_coarse = np.argmax(rates_coarse)
+
+        delta_coarse = (
+                lambda_coarse[1] - lambda_coarse[0]
+        )
+
+        lambda_fine_lo = max(
+            self.lambda_s_min,
+            lambda_coarse[i_coarse] - 3 * delta_coarse,
+        )
+
+        lambda_fine_hi = min(
+            self.lambda_s_max,
+            lambda_coarse[i_coarse] + 3 * delta_coarse,
+        )
+
+        lambda_fine = np.linspace(
+            lambda_fine_lo,
+            lambda_fine_hi,
+            fine_points,
+        )
+
+        rates_fine = np.array([
+            estimate_rate(lambda_s)
+            for lambda_s in lambda_fine
+        ])
+
+        i_fine = np.argmax(rates_fine)
+
+        return lambda_fine[i_fine]
+
     def adaptive_stopping(self, weighted_val):
         # Adaptive stopping criteria
         cumsum = np.cumsum(weighted_val, axis=-1)
@@ -581,7 +890,10 @@ class SPDC():
             conv_index[..., None],
             axis=-1
         )[..., 0]
-        signal_integrals = np.mean(phi_integrals, axis=1)
+        #signal_integrals = np.mean(phi_integrals, axis=1)
+
+        dphi = (self.phi_s_max - self.phi_s_min) / self.N_phi
+        signal_integrals = dphi * np.sum(phi_integrals, axis=1)
 
         return batch_index, signal_integrals
 
@@ -624,13 +936,13 @@ class SPDC():
 
         return np.concatenate(results)
 
-    def get_phase_matching_contour(self):
+    def get_phase_matching_contour(self, contour_grid_size=500):
         """
         Compute transverse phase matching grid.
+        :param contour_grid_size: grid size - contour has more point by default, no matter how fine spectrum grid is
         :return:
         """
         # Initialize grid
-        contour_grid_size = 500 # contour has more point by default, no matter how fine spectrum grid is
         contour_lambda_grid = np.linspace(self.lambda_s_min, self.lambda_s_max, contour_grid_size)
         contour_theta_grid = np.linspace(self.theta_s_min, self.theta_s_max, contour_grid_size)
         l = np.asarray(contour_lambda_grid).ravel()
@@ -681,13 +993,27 @@ class Imaging():
     """
     Class for simulating the quantum imaging with undetected light setup.
     """
-    def __init__(self, source=SPDC(), imaging_system=Michaelson(),
+    def __init__(self, source=SPDC(), imaging_system=Michaelson(source=SPDC()),
                  detector_size=512e-6, detector_pixels=1000,
-                 object_func=object_phase_bar,
+                 object_func=object_phase_bar, object_plane_size=10e-3, object_plane_pixels=1000,
                  signal_batch_size=24, n_processes=9, seed=None):
         # ------ SPDC source -------
         self.source = source # SPDC class instance
         self.imaging_system = imaging_system # class instance for imaging system
+        self.lambda_s_grid = np.linspace(source.lambda_s_min, source.lambda_s_max, source.grid_size)
+        #self.dlambda_s = source.lambda_s_max - source.lambda_s_min / (source.grid_size - 1)
+        self.theta_s_grid = np.linspace(source.theta_s_min, source.theta_s_max, source.grid_size)
+        #self.dtheta_s = source.theta_s_max - source.theta_s_min / (source.grid_size - 1)
+        self.dphi_s = (source.phi_s_max - source.phi_s_min) / source.N_phi
+
+        self.lambda_s_central = (source.lambda_s_max + source.lambda_s_min) / 2
+        n_s_central = n_eff(source.n_s_1, source.n_s_2, self.lambda_s_central, 0.0, source.t)
+        self.k_s_central = 2 * np.pi * n_s_central / self.lambda_s_central
+
+        self.dlambda_s = (source.lambda_s_max - source.lambda_s_min) / source.grid_size
+        self.dtheta_s = (source.theta_s_max - source.theta_s_min) / source.grid_size
+
+        self.grid_weight_s = self.dlambda_s * self.dtheta_s * self.dphi_s
 
         # ------ Detector ------
         # Detector is centered at (x,y) = (0,0)
@@ -697,15 +1023,27 @@ class Imaging():
         self.detector_pixels = detector_pixels # number of detector pixels
         # ...and it contains detector_pixels x detector_pixels pixels
         self.pixel_size = self.detector_size / self.detector_pixels # size of a pixel in m
+        self.half_pixel_size = self.pixel_size / 2
+        self.pixel_area = self.pixel_size**2
         # Detector grid
         self.x_edges = np.linspace(-self.detector_size / 2, self.detector_size / 2, self.detector_pixels + 1)
         self.y_edges = np.linspace(-self.detector_size / 2, self.detector_size / 2, self.detector_pixels + 1)
         self.x_mesh, self.y_mesh = np.meshgrid(self.x_edges, self.y_edges)
         self.x_grid = self.x_mesh.flatten()
         self.y_grid = self.y_mesh.flatten()
+        self.x_centers = 0.5 * (self.x_edges[:-1] + self.x_edges[1:])
+        self.y_centers = 0.5 * (self.y_edges[:-1] + self.y_edges[1:])
 
         # ------ Object -------
         self.object_func = object_func # function that mathematically represents object properties
+        # Object plane representation
+        self.object_plane_size = object_plane_size
+        self.object_plane_pixels = object_plane_pixels
+        self.object_pixel_size = self.object_plane_size / self.object_plane_pixels
+        self.object_x_edges = np.linspace(-self.object_plane_size / 2, self.object_plane_size / 2, self.object_plane_pixels + 1)
+        self.object_y_edges = np.linspace(-self.object_plane_size / 2, self.object_plane_size / 2, self.object_plane_pixels + 1)
+        self.object_x_centers = 0.5 * (self.object_x_edges[:-1] + self.object_x_edges[1:])
+        self.object_y_centers = 0.5 * (self.object_y_edges[:-1] + self.object_y_edges[1:])
 
         # ------ Parallelization --------
         self.signal_batch_size = signal_batch_size  # number of signal samples that are run on the same process
@@ -759,7 +1097,7 @@ class Imaging():
             conv_index_plus[..., None],
             axis=-1
         )[..., 0]
-        #signal_integrals_plus = np.mean(phi_integrals_plus, axis=1)
+        detector_values_plus = self.grid_weight_s * phi_integrals_plus
 
         # Destructive interference
         weighted_val_minus = weighted_val * (1 - (t_o * np.cos(phi_o)))
@@ -769,7 +1107,7 @@ class Imaging():
             conv_index_minus[..., None],
             axis=-1
         )[..., 0]
-        #signal_integrals_minus = np.mean(phi_integrals_minus, axis=1)
+        detector_values_minus = self.grid_weight_s * phi_integrals_minus
 
         # Propagate signal to detector
         n_s_func = lambda wavelength, theta: n_eff(src.n_s_1, src.n_s_2, wavelength, theta, src.t)
@@ -804,26 +1142,33 @@ class Imaging():
         # `bin_detector` expects 1D arrays - flatten all arrays
         return (
             batch_index,
-            phi_integrals_plus.ravel(),
-            phi_integrals_minus.ravel(),
+            detector_values_plus.ravel(),
+            detector_values_minus.ravel(),
+            x_o.ravel(),
+            y_o.ravel(),
+            phi_o.ravel(),
+            weighted_val.ravel(),
             x_d.ravel(),
-            y_d.ravel(),
+            y_d.ravel()
         )
 
-    def bin_detector(self, image, counts, x, y, vals):
+    def bin_samples(self, image, counts, x, y, vals, size, pixels):
+        pixel_size = size / pixels
+        half_size = size / 2
+
         # Shift left edge to 0
-        x_shifted = x + self.half_detector_size
-        y_shifted = y + self.half_detector_size
+        x_shifted = x + half_size
+        y_shifted = y + half_size
 
         # Divide by pixel size to get which pixel this signal propagates to
         # and convert to int pixel index
-        px = np.floor(x_shifted / self.pixel_size).astype(int)
-        py = np.floor(y_shifted / self.pixel_size).astype(int)
+        px = np.floor(x_shifted / pixel_size).astype(int)
+        py = np.floor(y_shifted / pixel_size).astype(int)
 
         # Valid pixels
         valid = (
-            (px >= 0) & (px < self.detector_pixels) &
-            (py >= 0) & (py < self.detector_pixels)
+                (px >= 0) & (px < pixels) &
+                (py >= 0) & (py < pixels)
         )
 
         # Add to the image
@@ -867,26 +1212,311 @@ class Imaging():
 
         plus_image = np.zeros((self.detector_pixels, self.detector_pixels))
         minus_image = np.zeros_like(plus_image)
+        object_plane = np.zeros((self.object_plane_pixels, self.object_plane_pixels))
 
         plus_counts = np.zeros_like(plus_image, dtype=int)
         minus_counts = np.zeros_like(minus_image, dtype=int)
+        object_plane_counts = np.zeros_like(object_plane, dtype=int)
 
-        with mp.Pool(processes=self.n_processes) as pool:
+        object_x_samples = []
+        object_y_samples = []
+        object_phi_samples = []
+        with (mp.Pool(processes=self.n_processes) as pool):
             for result in tqdm(
                     pool.imap_unordered(self.simulation_batch, tasks),
                     total=self.n_batches,
                     desc="Signal batches",
             ):
-                batch_index, detector_values_plus, detector_values_minus, x_d, y_d = result
+                batch_index, detector_values_plus, detector_values_minus, x_o, y_o, phi_o, weights_o, x_d, y_d = result
+
+                object_x_samples.append(x_o)
+                object_y_samples.append(y_o)
+                object_phi_samples.append(phi_o)
 
                 # Bin this batch's contributions
-                self.bin_detector(plus_image, plus_counts, x_d, y_d, detector_values_plus)
-                self.bin_detector(minus_image, minus_counts, x_d, y_d, detector_values_minus)
+                self.bin_samples(plus_image, plus_counts, x_d, y_d, detector_values_plus,
+                                 self.detector_size, self.detector_pixels)
+                self.bin_samples(minus_image, minus_counts, x_d, y_d, detector_values_minus,
+                                 self.detector_size, self.detector_pixels)
+                self.bin_samples(object_plane, object_plane_counts, x_o, y_o, weights_o,
+                                 self.object_plane_size, self.object_plane_pixels)
+
+
+        x_o = np.concatenate(object_x_samples)
+        y_o = np.concatenate(object_y_samples)
+        phi_o = np.concatenate(object_phi_samples)
 
         plus_image[plus_counts == 0] = np.nan
         minus_image[minus_counts == 0] = np.nan
 
-        det_visibility = ((plus_image - minus_image)
-                          / (plus_image + minus_image + 1e-20))
+        denominator = plus_image + minus_image
 
-        return plus_image, minus_image, det_visibility
+        max_denominator = np.nanmax(denominator)
+        min_signal = 1e-12 * max_denominator
+
+        valid_visibility = (
+                np.isfinite(plus_image)
+                & np.isfinite(minus_image)
+                & (denominator > min_signal)
+        )
+
+        det_visibility = np.full_like(
+            denominator,
+            np.nan,
+            dtype=float,
+        )
+
+        det_visibility[valid_visibility] = ((plus_image[valid_visibility] - minus_image[valid_visibility])
+                                            / denominator[valid_visibility])
+
+        return x_o, y_o, phi_o, plus_image, minus_image, det_visibility
+
+    def get_kernel(self):
+        src = self.source
+        img_sys = self.imaging_system
+
+        # Loop over signals and perform integration over phi and then also idlers
+        theta_s = 0.0
+        lambda_s = src.get_phase_matching_peak(
+            theta_target=theta_s, contour_grid_size=1000,
+            coarse_points=61, fine_points=101, N_i=2 ** 12, seed=None
+        )
+        f_val, p_val, valid, lambda_i, theta_i, phi_i = src.target_sampler(
+            lambda_s, theta_s=0.0, phi_s=0.0, N_i=2**15, sobol_seed=None, kernel_only=True
+        )
+
+        # Apply transition from crystal (medium) to vacuum and propagate idler to the object
+        n_i_func = lambda wavelength, theta: n_eff(src.n_i_1, src.n_i_2, wavelength, theta, src.t)
+        lambda_i_vac, theta_i_vac = medium_to_air(lambda_i, theta_i, n_i_func)
+
+        # Calculate coordinates after the propagation of idler to the object
+        # For a centered and aligned imaging system, the corresponding ideal object coordinate is approximately (0,0)
+        # Thus the idler coordinates themselves are already the relative coordinates
+        idler_result = img_sys.idler_arm(lambda_i_vac, theta_i_vac, phi_i)
+        x_o = idler_result.x
+        y_o = idler_result.y
+
+        # Propagate signal to detector
+        lambda_s_batch = lambda_s
+        theta_s_batch = theta_s
+
+        n_s_func = lambda wavelength, theta: n_eff(src.n_s_1, src.n_s_2, wavelength, theta, src.t)
+        lambda_s_vac, theta_s_vac = medium_to_air(lambda_s, theta_s, n_s_func)
+
+        # Propagate all signal directions to the detector.
+        # Every result has shape: (N_batch, N_phi)
+        detector_result = img_sys.detector_arm(lambda_s_vac, theta_s_vac, phi_s=0.0)
+        x_d = detector_result.x
+        y_d = detector_result.y
+
+        # Use central pixel
+        kernel_detector_radius = 2 * self.pixel_size
+        central_signal_mask = (
+                np.isfinite(x_d)
+                & np.isfinite(y_d)
+                & (np.abs(x_d) <= kernel_detector_radius)
+                & (np.abs(y_d) <= kernel_detector_radius)
+        )
+
+        # Create and normalize kernel
+        # We do not include object transmission or interference terms when building the kernel
+        # The kernel represents the system response before applying an object
+        weighted_val = np.divide(
+            f_val,
+            p_val,
+            out=np.zeros_like(f_val),
+            where=valid,
+        )
+
+        kernel_mask = (
+                central_signal_mask
+                & valid
+                & np.isfinite(x_o)
+                & np.isfinite(y_o)
+                & np.isfinite(weighted_val)
+        )
+
+        kernel_xy, _, _ = np.histogram2d(
+            x_o[kernel_mask],
+            y_o[kernel_mask],
+            bins=[self.object_x_edges, self.object_y_edges],
+            weights=weighted_val[kernel_mask],
+        )
+        kernel = kernel_xy.T
+
+        # Normalize kernel
+        kernel = kernel / kernel.sum()
+
+        # Center kernel (fftconvolve will assume this!)
+        yy, xx = np.indices(kernel.shape)
+
+        center_of_mass_x = np.sum(xx * kernel)
+        center_of_mass_y = np.sum(yy * kernel)
+
+        target_x = kernel.shape[1] // 2
+        target_y = kernel.shape[0] // 2
+
+        shift_x = int(np.rint(target_x - center_of_mass_x))
+        shift_y = int(np.rint(target_y - center_of_mass_y))
+
+        kernel = np.roll(
+            kernel,
+            shift=(shift_y, shift_x),
+            axis=(0, 1),
+        )
+
+        return kernel
+
+    def convolution_method_simulation(self, object_func, kernel):
+        # Get object transmission coefficient and phase from object function
+        x_obj, y_obj = np.meshgrid(
+            self.object_x_centers,
+            self.object_y_centers,
+            indexing="xy",
+        )
+        t_o, phi_o = object_func(x_obj, y_obj)
+        obj = t_o * np.cos(phi_o)
+
+        # Get object image
+        # Use padding because fftconvolve assumes 0 outside array
+        pad_y = kernel.shape[0] // 2
+        pad_x = kernel.shape[1] // 2
+
+        obj_padded = np.pad(
+            obj,
+            ((pad_y, pad_y), (pad_x, pad_x)),
+            mode="constant",
+            constant_values=1.0,
+        )
+
+        visibility_padded = fftconvolve(
+            obj_padded,
+            kernel,
+            mode="same",
+        )
+
+        t_i = 1.0
+        visibility_object = t_i * visibility_padded[
+            pad_y:pad_y + obj.shape[0],
+            pad_x:pad_x + obj.shape[1],
+        ]
+
+        return visibility_object
+
+    def convolve_on_extended_object_plane(
+            self,
+            object_func,
+            kernel,
+            extension_factor=2,
+            t_i=1.0,
+    ):
+        """
+        Simulates how the object actually extends beyond imaging plane.
+        Introduces more natural padding for convolution method.
+        :param object_func:
+        :param kernel:
+        :param extension_factor:
+        :param exterior_contrast:
+        :param t_i:
+        :return:
+        """
+        if extension_factor < 1:
+            raise ValueError(
+                "extension_factor must be at least 1."
+            )
+
+        kernel = np.asarray(
+            kernel,
+            dtype=float,
+        )
+
+        expected_shape = (
+            self.object_plane_pixels,
+            self.object_plane_pixels,
+        )
+
+        if kernel.shape != expected_shape:
+            raise ValueError(
+                f"kernel has shape {kernel.shape}, but expected "
+                f"{expected_shape}."
+            )
+
+        kernel = np.nan_to_num(
+            kernel,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+
+        if np.any(kernel < 0):
+            raise ValueError("kernel must be non-negative.")
+
+        kernel_sum = kernel.sum()
+
+        if kernel_sum <= 0:
+            raise ValueError("kernel has zero total weight.")
+
+        kernel = kernel / kernel_sum
+
+        n_original = self.object_plane_pixels
+        n_extended = extension_factor * n_original
+
+        if (n_extended - n_original) % 2 != 0:
+            raise ValueError(
+                "Choose extension_factor and object_plane_pixels such that "
+                "the original FOV can be centered on the extended grid."
+            )
+
+        crop_start = (n_extended - n_original) // 2
+        crop_stop = crop_start + n_original
+
+        # Keep the same physical object-plane pixel size
+        pixel_size = self.object_pixel_size
+
+        x_extended_centers = (np.arange(n_extended) - (n_extended - 1) / 2) * pixel_size
+        y_extended_centers = (np.arange(n_extended) - (n_extended - 1) / 2) * pixel_size
+
+        x_extended, y_extended = np.meshgrid(
+            x_extended_centers,
+            y_extended_centers,
+            indexing="xy",
+        )
+
+        t_o, phi_o = object_func(x_extended, y_extended)
+        t_o = np.asarray(t_o, dtype=float)
+        phi_o = np.asarray(phi_o, dtype=float)
+
+        # Check shapes
+        if t_o.shape != (n_extended, n_extended):
+            raise ValueError("object_func returned an unexpected transmission shape.")
+        if phi_o.shape != t_o.shape:
+            raise ValueError("object_func returned phase with a mismatched shape.")
+
+        object_contrast = (t_o * np.cos(phi_o))
+        if not np.all(np.isfinite(object_contrast)):
+            raise ValueError("Object contrast contains non-finite values.")
+
+        # The object function itself is evaluated across the large domain.
+        # No extra padding is required before convolution because the later
+        # crop removes the region influenced by the extended-grid boundary.
+        visibility_extended = t_i * fftconvolve(
+            object_contrast,
+            kernel,
+            mode="same",
+        )
+
+        visibility_cropped = visibility_extended[
+            crop_start:crop_stop,
+            crop_start:crop_stop,
+        ]
+
+        return visibility_cropped, {
+            "visibility_extended": visibility_extended,
+            "object_contrast_extended": object_contrast,
+            "x_extended_centers": x_extended_centers,
+            "y_extended_centers": y_extended_centers,
+            "crop_slice": (
+                slice(crop_start, crop_stop),
+                slice(crop_start, crop_stop),
+            ),
+        }
