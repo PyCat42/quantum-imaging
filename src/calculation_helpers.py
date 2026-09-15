@@ -250,3 +250,45 @@ def w_from_k_components(k_ix, k_iy, k_iz, n_i_1, n_i_2, temp, lambda_p):
     lambda_i = get_lambda_i_vectorized(k_i, theta_i, n_i_1, n_i_2, temp, lambda_p)
 
     return 2 * np.pi * c / lambda_i
+
+def interaction_time(
+    crystal_length,
+    lambda_p,
+    n_p_func,
+    dn_p_dlambda_func,
+    temperature,
+):
+    """
+
+    :param crystal_length: crystal length L in metres
+    :param lambda_p: pump vacuum wavelength in metres
+    :param n_p_func: refractive-index function
+                    n = n_p_func(lambda_p, temp=temperature)
+    :param dn_p_dlambda_func: wavelength derivative of the refraction index
+                            dn_dlambda = dn_p_dlambda_func(
+                                lambda_p,
+                                temp=temperature
+                            )
+    :param temperature: crystal temperature in degrees Celsius
+    :return:
+    """
+    n_phase = n_p_func(
+        lambda_p,
+        temp=temperature,
+    )
+
+    dn_dlambda = dn_p_dlambda_func(
+        lambda_p,
+        temp=temperature,
+    )
+
+    # Group refractive index
+    n_group = n_phase - lambda_p * dn_dlambda
+
+    # Group velocity
+    v_group = c / n_group
+
+    # Interaction time
+    T_I = crystal_length / v_group
+
+    return T_I, n_phase, n_group, v_group
