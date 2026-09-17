@@ -17,15 +17,15 @@ class SPDC():
     Class for simulation of SPDC source.
     """
     def __init__(self, L=1e-3, t=25, period=5.335e-6, m=-1, chi_eff=6e-12,
-                 lambda_p=405e-9, n_p=n_x_KTP,
+                 lambda_p=405e-9, n_p=n_z_KTP,
                  P=0.5, omega_0=60e-6, T_I=0,
                  lambda_s_min=625e-9, lambda_s_max=845e-9, lambda_s_central = 842e-9,
                  theta_s_min=0, theta_s_max=0.06,
                  phi_s_min=0, phi_s_max=2*pi,
-                 n_s_1=n_x_KTP, n_s_2=n_x_KTP,
-                 dn_s_1_dlambda=dn_x_KTP_dlambda, dn_s_2_dlambda=dn_x_KTP_dlambda,
+                 n_s_1=n_z_KTP, n_s_2=n_z_KTP,
                  lambda_i_central = 780e-9,
-                 n_i_1=n_x_KTP, n_i_2=n_x_KTP,
+                 n_i_1=n_z_KTP, n_i_2=n_z_KTP,
+                 dn_i_1_dlambda=dn_z_KTP_dlambda, dn_i_2_dlambda=dn_z_KTP_dlambda,
                  min_N_i=int(2**5), max_N_i=int(2**10), N_phi=int(2**5),
                  grid_size=int(100), seed=None,
                  eps=1e-12, conv_check=100, min_rel_err=1e-2, min_abs_error=1e-21,
@@ -69,8 +69,6 @@ class SPDC():
         self.phi_s_max = phi_s_max  # maximal value of signal azimuthal angle
         self.n_s_1 = n_s_1 # first refractive index that is contained in effective signal refractive index
         self.n_s_2 = n_s_2 # second refractive index that is contained in effective signal refractive index
-        self.dn_s_1_dlambda = dn_s_1_dlambda  # derivative of the first refractive index that is contained in effective signal refractive index
-        self.dn_s_2_dlambda = dn_s_2_dlambda  # derivative of the second refractive index that is contained in effective signal refractive index
 
         # -------- IDLER --------
         self.min_N_i = min_N_i  # minimal number of idler photons to simulate per signal photon
@@ -78,6 +76,8 @@ class SPDC():
         self.lambda_i_central = lambda_i_central  # central idler wavelength
         self.n_i_1 = n_i_1 # first refractive index that is contained in effective idler refractive index
         self.n_i_2 = n_i_2 # second refractive index that is contained in effective idler refractive index
+        self.dn_i_1_dlambda = dn_i_1_dlambda  # derivative of the first refractive index that is contained in effective idler refractive index
+        self.dn_i_2_dlambda = dn_i_2_dlambda  # derivative of the second refractive index that is contained in effective idler refractive index
 
         # -------- SIMULATION --------
         # Generator seed
@@ -244,7 +244,7 @@ class SPDC():
                 # w = 2 * pi * c / lambda
                 # dw/dlambda = - 2 * pi * c / lambda**2
                 # => dw/dk = c / (n - lambda * dn/dlambda)
-                jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i) * (1 / np.abs(np.cos(theta_i)))) / c
+                jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i)) / (np.abs(np.cos(theta_i)) * c)
                 # - calculate other prefactors
                 idler_prefactor = jacobian * w_i / n_i ** 2
                 gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
@@ -463,7 +463,7 @@ class SPDC():
             # w = 2 * pi * c / lambda
             # dw/dlambda = - 2 * pi * c / lambda**2
             # => dw/dk = c / (n - lambda * dn/dlambda)
-            jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i) * (1 / np.abs(np.cos(theta_i)))) / c
+            jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i)) / (np.abs(np.cos(theta_i)) * c)
             # - calculate other prefactors
             idler_prefactor = jacobian * w_i / n_i ** 2
             gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
@@ -530,7 +530,7 @@ class SPDC():
         return f_val, p_val, valid, lambda_i, theta_i, phi_i
 
     def target_sampler(self, lambda_s, theta_s=0.0, phi_s=0.0, N_i=None, sobol_seed=None, kernel_only=False):
-        n_s = self.n_s_func(self.n_s_1, self.n_s_2, lambda_s, theta_s, self.t)
+        n_s = n_eff(self.n_s_1, self.n_s_2, lambda_s, theta_s, self.t)
 
         k_s = 2 * np.pi * n_s / lambda_s
         w_s = 2 * np.pi * c / lambda_s
@@ -607,7 +607,7 @@ class SPDC():
             # w = 2 * pi * c / lambda
             # dw/dlambda = - 2 * pi * c / lambda**2
             # => dw/dk = c / (n - lambda * dn/dlambda)
-            jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i) * (1 / np.abs(np.cos(theta_i)))) / c
+            jacobian = (n_i - lambda_i * d_n_i_dlambda_func(lambda_i, theta_i)) / (np.abs(np.cos(theta_i)) * c)
             # - calculate other prefactors
             idler_prefactor = jacobian * w_i / n_i ** 2
             gauss_term = np.exp(- self.omega_0 ** 2 * (delta_k_x ** 2 + delta_k_y ** 2) / 2)
@@ -950,7 +950,7 @@ class SPDC():
         lam, theta = np.meshgrid(l, t, indexing="xy")
 
         # Signal refractive index and wavevector (vectorized in the right shape)
-        n_s = self.n_s_func(self.n_s_1, self.n_s_2, lam, theta, self.t)
+        n_s = n_eff(self.n_s_1, self.n_s_2, lam, theta, self.t)
         k_s = 2 * np.pi * n_s / lam
 
         # Energy conservation
