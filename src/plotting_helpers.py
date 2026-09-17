@@ -14,41 +14,124 @@ def plot_spectrum(spdc, vals):
     :param vals: intensity grid
     :return:
     """
-    # Plot spectrum
-    plt.figure(figsize=(10, 6))
     spectrum = vals.reshape((
         spdc.theta_s_grid.size,
         spdc.lambda_s_grid.size,
     ))
+
+    if spdc.lambda_s_max < 2 * spdc.lambda_p:
+        plt.figure(figsize=(8, 6))
+    else:
+        plt.figure(figsize=(10, 6))
+
     plt.pcolormesh(
-        spdc.lambda_s_grid * 1e9, # convert to nm
-        np.rad2deg(spdc.theta_s_grid), # convert theta to degrees
+        spdc.lambda_s_grid * 1e9,  # convert to nm
+        np.rad2deg(spdc.theta_s_grid),  # convert theta to degrees
         spectrum,
         shading='auto',
         cmap='magma',
-        vmin=0
+        vmin=0,
+        vmax=5e18
     )
-    plt.colorbar(label="Transition rate dR")
+    cbar = plt.colorbar()
+    cbar.ax.tick_params(labelsize=14)
+    cbar.set_label(r"Transition rate dR ($(m \cdot deg \cdot s)^{-1}$)", fontsize=16)
 
     # Plot phase matching contour
     lam, theta, dkz = spdc.get_phase_matching_contour()
     plt.contour(
         lam * 1e9, np.rad2deg(theta), dkz,
         levels=[0.0],
-        colors='red', linewidths=0.6, linestyles='-',
+        colors='springgreen', linewidths=0.4, linestyles='-',
     )
-    contour_handle = mlines.Line2D(
-        [], [],
-        color='red',
-        linewidth=2,
-        linestyle='-',
-        label=r'$\Delta k_z = 0$',
-    )
-    plt.legend(handles=[contour_handle])
+    # Base legend handles
+    legend_handles = [
+        mlines.Line2D(
+            [],
+            [],
+            color='springgreen',
+            linewidth=2,
+            linestyle='-',
+            label=r'$\Delta k_z = 0$',
+        )
+    ]
 
-    plt.title("Spectrum")
-    plt.xlabel(r"$\lambda_s$ (nm)")
-    plt.ylabel(r"$\theta_s$ internal (deg)")
+    # Add SPDC metadata entries to legend
+    legend_handles.extend([
+        mlines.Line2D([], [], color='none', label=rf'$t = {spdc.t}^{{\circ}} C$'),
+        mlines.Line2D([], [], color='none', label=rf'$L = {spdc.L * 1e3}mm$'),
+        mlines.Line2D(
+            [], [], color='none', label=rf'$\omega_0 = {spdc.omega_0 * 1e6} \mu m$'
+        ),
+    ])
+
+    # Find intersections of contour with x-axis  (theta = 0)
+    # - Take the row closest to theta = 0
+    theta_idx = np.argmin(np.abs(theta))
+    dkz_xaxis = dkz[theta_idx, :]
+    lam_xaxis = lam[:,] if lam.ndim == 1 else lam[theta_idx, :]
+
+    # - Find sign changes in dkz
+    sign_changes = np.where(np.sign(dkz_xaxis[:-1]) != np.sign(dkz_xaxis[1:]))[0]
+    intersections = []
+    for i in sign_changes:
+        # Linear interpolation between two neighboring points
+        x1 = lam_xaxis[i]
+        x2 = lam_xaxis[i + 1]
+
+        y1 = dkz_xaxis[i]
+        y2 = dkz_xaxis[i + 1]
+
+        if y2 != y1:
+            x_intersection = x1 - y1 * (x2 - x1) / (y2 - y1)
+
+        intersections.append(x_intersection)
+
+    # Convert to nm and sort by wavelength
+    intersections_nm = np.sort(np.array(intersections) * 1e9)
+
+    if len(intersections_nm) == 0:
+        print("No colinear SPDC emission!")
+    if len(intersections_nm) == 1:
+        if intersections_nm[0] < 2 * spdc.lambda_p * 1e9:
+            # Smaller wavelength = Signal = red star
+            lambda_signal = intersections_nm[0]
+            sc_signal = plt.scatter(lambda_signal, 0.0, color='red', marker='*', s=100, zorder=5, clip_on=False,
+                                    label=rf'Signal ($\lambda_s={lambda_signal:.2f}$ nm)')
+            legend_handles.extend([sc_signal])
+        else:
+            # Equal wavelengths = Degeneracy = green star
+            lambda_deg = intersections_nm[0]
+            sc_deg = plt.scatter(lambda_deg, 0.0, color='green', marker='*', s=100, zorder=5, clip_on=False,
+                                    label=rf'Degeneracy ($\lambda_s=\lambda_i={lambda_deg:.2f}$ nm)')
+            legend_handles.extend([sc_deg])
+
+    elif len(intersections_nm) == 2:
+        # Smaller wavelength = Signal = red star
+        lambda_signal = intersections_nm[0]
+        sc_signal = plt.scatter(lambda_signal, 0.0, color='red', marker='*', s=100, zorder=5, clip_on=False,
+                                label=rf'Signal ($\lambda_s={lambda_signal:.2f}$ nm)')
+        legend_handles.extend([sc_signal])
+
+        # Larger wavelength = Idler = blue star
+        lambda_idler = intersections_nm[1]
+        sc_idler = plt.scatter(lambda_idler, 0.0, color='blue', marker='*', s=100, zorder=5, clip_on=False,
+                    label=rf'Idler ($\lambda_i={lambda_idler:.2f}$ nm)')
+        legend_handles.extend([sc_idler])
+
+    plt.title("SPDC Spectrum", fontsize=20)
+    plt.xlabel(r"$\lambda_s$ (nm)", fontsize=16)
+    plt.ylabel(r"$\theta_{s, int}$ (deg)", fontsize=16)
+    if spdc.lambda_s_max > 2 * spdc.lambda_p:
+        plt.legend(handles=legend_handles, loc='upper center')
+    else:
+        plt.legend(handles=legend_handles, loc='upper right')
+
+    plt.tick_params(axis='both', labelsize=14)
+    plt.tight_layout()
+
+    filename = f"spectrum_L{spdc.L}_t{spdc.t}_w{spdc.omega_0}.pdf"
+    plt.savefig(filename, dpi=300)
 
     plt.show()
 
@@ -83,8 +166,8 @@ def plot_visibility_images(detector_size, detector_pixels,
     )
 
     mesh0 = ax[0].pcolormesh(
-        x_edges*1e3,
-        y_edges*1e3,
+        x_edges * 1e3,
+        y_edges * 1e3,
         img1,
         shading="auto",
         cmap=cmap,
@@ -98,8 +181,8 @@ def plot_visibility_images(detector_size, detector_pixels,
     fig.colorbar(mesh0, ax=ax[0], label="Visibility", orientation="vertical")
 
     mesh1 = ax[1].pcolormesh(
-        x_edges*1e3,
-        y_edges*1e3,
+        x_edges * 1e3,
+        y_edges * 1e3,
         img2,
         shading="auto",
         cmap=cmap,
@@ -112,8 +195,8 @@ def plot_visibility_images(detector_size, detector_pixels,
     fig.colorbar(mesh1, ax=ax[1], label="Count rate (1/s)", orientation="vertical")
 
     mesh2 = ax[2].pcolormesh(
-        x_edges*1e3,
-        y_edges*1e3,
+        x_edges * 1e3,
+        y_edges * 1e3,
         img3,
         shading="auto",
         cmap="magma",
@@ -127,13 +210,14 @@ def plot_visibility_images(detector_size, detector_pixels,
 
     plt.show()
 
+
 def overlay_object_outline(ax,
-    detector_size, detector_pixels,
-    object_func,
-    magnification,
-    color="red", linewidth=1.5, linestyle="--", alpha=0.95,
-    contour_level=0.01
-):
+                           detector_size, detector_pixels,
+                           object_func,
+                           magnification,
+                           color="red", linewidth=1.5, linestyle="--", alpha=0.95,
+                           contour_level=0.01
+                           ):
     """
     Draw the geometrically magnified object boundary over a detector image.
     :param ax: existing axes containing a detector-plane image
@@ -188,10 +272,10 @@ def overlay_object_outline(ax,
 
     # No boundary if the object map is constant.
     if np.isclose(
-        object_min,
-        object_max,
-        rtol=1e-12,
-        atol=1e-14,
+            object_min,
+            object_max,
+            rtol=1e-12,
+            atol=1e-14,
     ):
         return None
 
@@ -208,15 +292,16 @@ def overlay_object_outline(ax,
 
     return contour_set
 
+
 def plot_visibility(
-    detector_size,
-    detector_pixels,
-    detector_visibility,
-    overlay_object_contour=False,
-    object_func=None,
-    magnification=None,
-    outline_color="red",
-    draw_x0=False
+        detector_size,
+        detector_pixels,
+        detector_visibility,
+        overlay_object_contour=False,
+        object_func=None,
+        magnification=None,
+        outline_color="red",
+        draw_x0=False
 ):
     """
 
@@ -305,6 +390,7 @@ def plot_visibility(
     plt.tight_layout()
     plt.show()
 
+
 def draw_object(ax, plane_size, plane_pixels, object_func, quantity="transmission"):
     x = np.linspace(- plane_size / 2, plane_size / 2, plane_pixels + 1)
     y = np.linspace(- plane_size / 2, plane_size / 2, plane_pixels + 1)
@@ -345,6 +431,7 @@ def draw_object(ax, plane_size, plane_pixels, object_func, quantity="transmissio
 
     return background
 
+
 def plot_obj_plane(x_obj, y_obj, phi_obj,
                    plane_size, plane_pixels, object_func, quantity):
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -370,23 +457,23 @@ def plot_obj_plane(x_obj, y_obj, phi_obj,
     ax.set_xlim(-half_size_mm, half_size_mm)
     ax.set_ylim(-half_size_mm, half_size_mm)
 
-
     fig.colorbar(sampled, ax=ax, label="Object phase (rad)")
 
     plt.show()
 
+
 def plot_absorbing_object(
-    object_func,
-    object_plane_size,
-    object_plane_pixels,
-    draw_markers=True,
-    bar_width=None,
-    gap=None,
-    center_y=0.0,
-    transmission_threshold=0.5,
-    title="Absorbing object",
-    unit="mm",
-    ax=None,
+        object_func,
+        object_plane_size,
+        object_plane_pixels,
+        draw_markers=True,
+        bar_width=None,
+        gap=None,
+        center_y=0.0,
+        transmission_threshold=0.5,
+        title="Absorbing object",
+        unit="mm",
+        ax=None,
 ):
     """
     Plot a binary absorbing object as black object / white background.
@@ -543,8 +630,8 @@ def plot_absorbing_object(
         ax.text(
             x_marker_text * scale,
             0.5 * (
-                upper_bar_lower_edge
-                + upper_bar_upper_edge
+                    upper_bar_lower_edge
+                    + upper_bar_upper_edge
             ) * scale,
             rf"$w={bar_width * scale:.3g}$ {unit_label}",
             color="purple",
@@ -616,6 +703,7 @@ def plot_absorbing_object(
         "mesh": mesh,
     }
 
+
 def fwhm_from_curve(x, y):
     """
     Find the full width at half maximum of a sampled 1D curve.
@@ -679,14 +767,15 @@ def fwhm_from_curve(x, y):
 
     return fwhm, x_left, x_right, x_peak, y_peak
 
+
 def add_fwhm_annotation(
-    ax,
-    x_left,
-    x_right,
-    y_peak,
-    unit_scale=1e3,
-    unit_label="mm",
-    color="darkblue",
+        ax,
+        x_left,
+        x_right,
+        y_peak,
+        unit_scale=1e3,
+        unit_label="mm",
+        color="darkblue",
 ):
     """
     Draw an FWHM bracket and label on a 1D density plot.
@@ -700,9 +789,9 @@ def add_fwhm_annotation(
     :return:
     """
     if not (
-        np.isfinite(x_left)
-        and np.isfinite(x_right)
-        and np.isfinite(y_peak)
+            np.isfinite(x_left)
+            and np.isfinite(x_right)
+            and np.isfinite(y_peak)
     ):
         return
 
@@ -749,12 +838,13 @@ def add_fwhm_annotation(
         },
     )
 
+
 def plot_psf(psf,
              object_x_edges, object_y_edges,
              object_x_centers=None, object_y_centers=None,
              cut_half_width=2e-3, normalize=True,
              n_kde_points=2000
-    ):
+             ):
     # Convert PSF to array and check dimensions and values
     psf = np.asarray(psf, dtype=float).copy()
     if psf.ndim != 2:
@@ -873,13 +963,13 @@ def plot_psf(psf,
 
     # PSF plot
     mesh0 = ax[0].pcolormesh(
-            object_x_edges * 1e3,
-            object_y_edges * 1e3,
-            psf,
-            shading="flat",
-            cmap=cmap,
-            vmin=0,
-            vmax=np.max(psf)
+        object_x_edges * 1e3,
+        object_y_edges * 1e3,
+        psf,
+        shading="flat",
+        cmap=cmap,
+        vmin=0,
+        vmax=np.max(psf)
     )
 
     # Zoomed in PSF
