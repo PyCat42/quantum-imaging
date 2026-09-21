@@ -1,5 +1,6 @@
 from numpy.lib._stride_tricks_impl import sliding_window_view
 from scipy.constants import pi, epsilon_0
+from scipy.interpolate import RegularGridInterpolator
 from scipy.signal import fftconvolve
 from scipy.stats import norm, qmc
 from scipy.special import ndtri
@@ -19,17 +20,16 @@ class SPDC():
     def __init__(self, L=1e-3, t=25, period=5.335e-6, m=-1, chi_eff=6e-12,
                  lambda_p=405e-9, n_p=n_z_KTP,
                  P=0.5, omega_0=60e-6, T_I=0,
-                 lambda_s_min=625e-9, lambda_s_max=845e-9, lambda_s_central = 842e-9,
+                 lambda_s_min=625e-9, lambda_s_max=845e-9,
                  theta_s_min=0, theta_s_max=0.06,
                  phi_s_min=0, phi_s_max=2*pi,
                  n_s_1=n_z_KTP, n_s_2=n_z_KTP,
-                 lambda_i_central = 780e-9,
                  n_i_1=n_z_KTP, n_i_2=n_z_KTP,
                  dn_i_1_dlambda=dn_z_KTP_dlambda, dn_i_2_dlambda=dn_z_KTP_dlambda,
                  min_N_i=int(2**5), max_N_i=int(2**10), N_phi=int(2**5),
                  grid_size=int(100), seed=None,
                  eps=1e-12, conv_check=100, min_rel_err=1e-2, min_abs_error=1e-21,
-                 signal_batch_size=24, n_conv=16, n_processes=9):
+                 signal_batch_size=24, n_conv=2, n_processes=9):
         #TODO: Make parameter database
 
         # -------- CRYSTAL --------
@@ -61,7 +61,6 @@ class SPDC():
         self.N_s = self.grid_size ** 2 # number of signal photons to simulate
         self.lambda_s_min = lambda_s_min # minimal value of signal wavelength
         self.lambda_s_max = lambda_s_max # maximal value of signal wavelength
-        self.lambda_s_central = lambda_s_central # central signal wavelength
         self.theta_s_min = theta_s_min # minimal value of signal polar angle
         self.theta_s_max = theta_s_max # maximal value of signal polar angle
         self.N_phi = N_phi  # number of phi angles sampled for each signal sample
@@ -73,7 +72,6 @@ class SPDC():
         # -------- IDLER --------
         self.min_N_i = min_N_i  # minimal number of idler photons to simulate per signal photon
         self.max_N_i = max_N_i  # maximal number of idler photons to simulate per signal photon
-        self.lambda_i_central = lambda_i_central  # central idler wavelength
         self.n_i_1 = n_i_1 # first refractive index that is contained in effective idler refractive index
         self.n_i_2 = n_i_2 # second refractive index that is contained in effective idler refractive index
         self.dn_i_1_dlambda = dn_i_1_dlambda  # derivative of the first refractive index that is contained in effective idler refractive index
@@ -148,6 +146,84 @@ class SPDC():
         ]
         self.n_processes = n_processes
 
+        self.find_collinear_wavelengths()
+
+    def find_collinear_wavelengths(self, contour_grid_size=1000):
+        # Initialize grid
+        contour_lambda_grid = np.linspace(self.lambda_p + 100e-9, 4 * self.lambda_p, contour_grid_size)
+        contour_theta_grid = np.linspace(self.theta_s_min, self.theta_s_max, contour_grid_size)
+        l = np.asarray(contour_lambda_grid).ravel()
+        t = np.asarray(contour_theta_grid).ravel()
+        lam, theta = np.meshgrid(l, t, indexing="xy")
+
+        # Signal refractive index and wavevector (vectorized in the right shape)
+        n_s = n_eff(self.n_s_1, self.n_s_2, lam, theta, self.t)
+        k_s = 2 * np.pi * n_s / lam
+
+        # Energy conservation
+        denom = lam - self.lambda_p
+        denom = np.where(np.abs(denom) < 1e-12, 1e-12, denom)
+        lambda_i = self.lambda_p * lam / denom
+
+        # Transverse momentum conservation: k_s sin(theta_s) = k_i sin(theta_i)
+        # => sin (theta_i) = (k_s / k_i) sin(theta_s)
+        # k_i itself also depends on theta_i - both sides depend on it!
+
+        # Apply iterative approach (here only 5 steps as the dependence of n_i on theta_i
+        # is usually smooth and not extremely strong, this fixed-point iteration converges quickly
+        # Step 1: Initial guess - theta is 0 everywhere
+        theta_i = np.zeros_like(lambda_i)
+        for _ in range(30):
+            # Step 2: Compute idler refractive index with the current estimate...
+            n_i = n_eff(self.n_i_1, self.n_i_2, lambda_i, theta_i, self.t)
+            # ... and from it the idler vector magnitude
+            k_i = 2 * np.pi * n_i / lambda_i
+
+            # Step 3: Get new estimate for theta from transverse momentum conservation
+            sin_theta = k_s * np.sin(theta) / k_i
+            valid = np.abs(sin_theta) <= 1
+
+            # Step 4: Update theta
+            theta_i = np.full_like(theta, np.nan)
+            theta_i[valid] = np.arcsin(sin_theta[valid])
+
+        # Now recompute n_i and k_i with the final estimate...
+        n_i = n_eff(self.n_i_1, self.n_i_2, lambda_i, theta_i, self.t)
+        k_i = 2 * np.pi * n_i / lambda_i
+        # ...and evaluate longitudinal mismatch
+        dkz = self.k_p + self.k_m - k_s * np.cos(theta) - k_i * np.cos(theta_i)
+
+        # Find intersections of contour with x-axis  (theta = 0)
+        # - Take the row closest to theta = 0
+        theta_idx = np.argmin(np.abs(theta))
+        dkz_xaxis = dkz[theta_idx, :]
+        lam_xaxis = lam[:,] if lam.ndim == 1 else lam[theta_idx, :]
+
+        # - Find sign changes in dkz
+        sign_changes = np.where(np.sign(dkz_xaxis[:-1]) != np.sign(dkz_xaxis[1:]))[0]
+        intersections = []
+        for i in sign_changes:
+            # Linear interpolation between two neighboring points
+            x1 = lam_xaxis[i]
+            x2 = lam_xaxis[i + 1]
+
+            y1 = dkz_xaxis[i]
+            y2 = dkz_xaxis[i + 1]
+
+            if y2 != y1:
+                x_intersection = x1 - y1 * (x2 - x1) / (y2 - y1)
+
+            intersections.append(x_intersection)
+
+        if len(intersections) == 0:
+            self.lambda_s_central = None
+            self.lambda_i_central = None
+        elif len(intersections) == 1:
+            self.lambda_s_central = intersections[0]
+            self.lambda_i_central = intersections[0]
+        else:
+            self.lambda_s_central = intersections[0]
+            self.lambda_i_central = intersections[1]
 
     def get_transition_rate(self):
         # Loop over signals and perform integration over phi and then also idlers
@@ -1037,7 +1113,7 @@ class Imaging():
         # ------ Object -------
         self.object_func = object_func # function that mathematically represents object properties
         # Object plane representation
-        self.object_plane_size = object_plane_size
+        self.object_plane_size = 2 * detector_size / abs(imaging_system.magnification())
         self.object_plane_pixels = object_plane_pixels
         self.object_pixel_size = self.object_plane_size / self.object_plane_pixels
         self.object_x_edges = np.linspace(-self.object_plane_size / 2, self.object_plane_size / 2, self.object_plane_pixels + 1)
@@ -1218,9 +1294,11 @@ class Imaging():
         minus_counts = np.zeros_like(minus_image, dtype=int)
         object_plane_counts = np.zeros_like(object_plane, dtype=int)
 
+        """
         object_x_samples = []
         object_y_samples = []
         object_phi_samples = []
+        """
         with (mp.Pool(processes=self.n_processes) as pool):
             for result in tqdm(
                     pool.imap_unordered(self.simulation_batch, tasks),
@@ -1229,9 +1307,11 @@ class Imaging():
             ):
                 batch_index, detector_values_plus, detector_values_minus, x_o, y_o, phi_o, weights_o, x_d, y_d = result
 
+                """
                 object_x_samples.append(x_o)
                 object_y_samples.append(y_o)
                 object_phi_samples.append(phi_o)
+                """
 
                 # Bin this batch's contributions
                 self.bin_samples(plus_image, plus_counts, x_d, y_d, detector_values_plus,
@@ -1241,10 +1321,11 @@ class Imaging():
                 self.bin_samples(object_plane, object_plane_counts, x_o, y_o, weights_o,
                                  self.object_plane_size, self.object_plane_pixels)
 
-
+        """
         x_o = np.concatenate(object_x_samples)
         y_o = np.concatenate(object_y_samples)
         phi_o = np.concatenate(object_phi_samples)
+        """
 
         plus_image[plus_counts == 0] = np.nan
         minus_image[minus_counts == 0] = np.nan
@@ -1252,7 +1333,7 @@ class Imaging():
         denominator = plus_image + minus_image
 
         max_denominator = np.nanmax(denominator)
-        min_signal = 1e-12 * max_denominator
+        min_signal = 1e-30 * max_denominator
 
         valid_visibility = (
                 np.isfinite(plus_image)
@@ -1269,7 +1350,7 @@ class Imaging():
         det_visibility[valid_visibility] = ((plus_image[valid_visibility] - minus_image[valid_visibility])
                                             / denominator[valid_visibility])
 
-        return x_o, y_o, phi_o, plus_image, minus_image, det_visibility
+        return plus_image, minus_image, det_visibility
 
     def get_kernel(self):
         src = self.source
@@ -1282,7 +1363,7 @@ class Imaging():
             coarse_points=61, fine_points=101, N_i=2 ** 12, seed=None
         )
         f_val, p_val, valid, lambda_i, theta_i, phi_i = src.target_sampler(
-            lambda_s, theta_s=0.0, phi_s=0.0, N_i=2**15, sobol_seed=None, kernel_only=True
+            src.lambda_s_central, theta_s=0.0, phi_s=0.0, N_i=2**15, sobol_seed=None, kernel_only=True
         )
 
         # Apply transition from crystal (medium) to vacuum and propagate idler to the object
@@ -1296,12 +1377,8 @@ class Imaging():
         x_o = idler_result.x
         y_o = idler_result.y
 
-        # Propagate signal to detector
-        lambda_s_batch = lambda_s
-        theta_s_batch = theta_s
-
         n_s_func = lambda wavelength, theta: n_eff(src.n_s_1, src.n_s_2, wavelength, theta, src.t)
-        lambda_s_vac, theta_s_vac = medium_to_air(lambda_s, theta_s, n_s_func)
+        lambda_s_vac, theta_s_vac = medium_to_air(src.lambda_s_central, theta_s, n_s_func)
 
         # Propagate all signal directions to the detector.
         # Every result has shape: (N_batch, N_phi)
@@ -1461,13 +1538,12 @@ class Imaging():
         n_original = self.object_plane_pixels
         n_extended = extension_factor * n_original
 
-        if (n_extended - n_original) % 2 != 0:
-            raise ValueError(
-                "Choose extension_factor and object_plane_pixels such that "
-                "the original FOV can be centered on the extended grid."
-            )
+        extra_pixels = n_extended - n_original
 
-        crop_start = (n_extended - n_original) // 2
+        pad_before = extra_pixels // 2
+        pad_after = extra_pixels - pad_before
+
+        crop_start = pad_before
         crop_stop = crop_start + n_original
 
         # Keep the same physical object-plane pixel size
@@ -1520,3 +1596,80 @@ class Imaging():
                 slice(crop_start, crop_stop),
             ),
         }
+
+    def project_object_visibility_to_detector(
+            self,
+            visibility_object,
+            magnification=None,
+            fill_value=np.nan,
+    ):
+        """
+        Map an object-plane convolution image to the detector grid using:
+
+            x_det = M * x_obj
+            y_det = M * y_obj.
+
+        Therefore, each detector-grid coordinate is evaluated at:
+
+            x_obj = x_det / M
+            y_obj = y_det / M.
+        """
+        if magnification is None:
+            magnification = self.imaging_system.magnification()
+
+        if magnification == 0:
+            raise ValueError(
+                "Magnification must not be zero."
+            )
+
+        visibility_object = np.asarray(
+            visibility_object,
+            dtype=float,
+        )
+
+        expected_shape = (
+            self.object_plane_pixels,
+            self.object_plane_pixels,
+        )
+
+        if visibility_object.shape != expected_shape:
+            raise ValueError(
+                f"visibility_object has shape "
+                f"{visibility_object.shape}, expected "
+                f"{expected_shape}."
+            )
+
+        interpolator = RegularGridInterpolator(
+            (
+                self.object_y_centers,
+                self.object_x_centers,
+            ),
+            visibility_object,
+            bounds_error=False,
+            fill_value=fill_value,
+        )
+
+        x_det, y_det = np.meshgrid(
+            self.x_centers,
+            self.y_centers,
+            indexing="xy",
+        )
+
+        x_obj = x_det / magnification
+        y_obj = y_det / magnification
+
+        sample_points = np.column_stack(
+            (
+                y_obj.ravel(),
+                x_obj.ravel(),
+            )
+        )
+
+        visibility_detector = interpolator(
+            sample_points,
+        ).reshape(
+            self.detector_pixels,
+            self.detector_pixels,
+        )
+
+        return visibility_detector
