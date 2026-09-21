@@ -28,41 +28,44 @@ def M_lens(f):
     """
     return np.array([[1, 0], [- 1 / f, 1]])
 
-
-def medium_to_air(lambda_med, theta_med, n):
+def medium_to_air(lambda_vac, theta_med, n):
     """
     Modeling transition from medium (crystal) to air.
-    Section 4.3.2, equation 4.10, Riexinger
     :param lambda_med: ray wavelength in medium
     :param theta_med: ray angle in medium
     :param n: refractive index function (from Sellmeier.py)
     :return: ray angle in vacuum (theta_vac_solution)
             ray wavelength in medium (lambda_vac_solution)
     """
-    def medium_to_air_single(lambda_med_single, theta_med_single):
-        objective = lambda lambda_vac: lambda_vac / n(lambda_vac, theta_med_single) - lambda_med_single
 
-        a = 0.1 * lambda_med_single
-        b = 10 * lambda_med_single
+    lambda_vac = np.asarray(lambda_vac, dtype=float)
+    theta_med = np.asarray(theta_med, dtype=float)
 
-        f_a = objective(a)
-        f_b = objective(b)
+    # Make input arrays the same shape before boolean masking.
+    lambda_vac, theta_med = np.broadcast_arrays(lambda_vac, theta_med)
+    n_med = n(lambda_vac, theta_med)
+    n_med = np.asarray(n_med, dtype=float)
 
-        if f_a * f_b > 0:
-            return np.nan
+    # The index function should also broadcast to the common shape.
+    n_med = np.broadcast_to(n_med, lambda_vac.shape)
 
-        try:
-            lambda_vac_solution = brentq(objective, a, b)
-        except ValueError:
-            lambda_vac_solution = np.nan
+    sin_theta_vac = n_med * np.sin(theta_med)
 
-        # use Snell's law to retrieve theta_vac
-        theta_vac_solution = np.arcsin(n(lambda_vac_solution, theta_med_single) * np.sin(theta_med_single))
+    valid = (
+        np.isfinite(lambda_vac)
+        & np.isfinite(theta_med)
+        & np.isfinite(n_med)
+        & (np.abs(sin_theta_vac) <= 1.0)
+    )
 
-        return lambda_vac_solution, theta_vac_solution
+    lambda_vac_out = np.where(valid, lambda_vac, np.nan)
+    theta_vac = np.where(
+        valid,
+        np.arcsin(np.clip(sin_theta_vac, -1.0, 1.0)),
+        np.nan,
+    )
 
-    vec_solutions = np.vectorize(medium_to_air_single)
-    return vec_solutions(lambda_med, theta_med)
+    return lambda_vac_out, theta_vac
 
 def propagate(r, alpha, M):
     """
