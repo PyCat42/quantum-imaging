@@ -114,13 +114,13 @@ $$\exp\left[-\frac{\omega_0^2(\Delta k_x^2+\Delta k_y^2)}{2}\right],$$
 
 and the finite crystal length produces the longitudinal phase-matching factor
 
-$$\operatorname{sinc}^2\left(\frac{\Delta k_z L}{2}\right).$$
+$$\mathrm{sinc}^2\left(\frac{\Delta k_z L}{2}\right).$$
 
 Therefore we get the differential transition rate for generating signal photons with
 wavelength in the interval $[\lambda_s, \lambda_s + d\lambda_s]$ and 
 polar angle in the interval $[\theta_s, \theta_s + d\theta_s]$:
 
-$$dR(\lambda_s, \theta_s) = \sum_m \frac{4 P L^2 T_I \omega_0^2}{\varepsilon_0^3 (2\pi)^7 m^2 c n_p} \int_0^{2\pi} d\phi_s \int_{\mathbb{R}^3} d\mathbf{k}_i \, \Bigl[ \bigl(\chi_{\mathrm{eff}}^{(2)}(\mathbf{k}_p, \epsilon_p, \mathbf{k}_s, \epsilon_s, \mathbf{k}_i, \epsilon_i)\bigr)^2 \frac{\vert{}\mathbf{k}_s\vert{}^4 \omega_s \omega_i}{n_s^2 n_i^2} \operatorname{sinc}^2\!\left(\frac{\Delta\omega\, T_I}{2}\right) \operatorname{sinc}^2\!\left(\frac{\Delta k_z L}{2}\right) e^{-\frac{\omega_0^2 (\Delta k_x^2 + \Delta k_y^2)}{2}} \Bigr] \sin\theta_s \, d\theta_s \, d\lambda_s.$$
+$$dR(\lambda_s, \theta_s) = \sum_m \frac{4 P L^2 T_I \omega_0^2}{\varepsilon_0^3 (2\pi)^7 m^2 c n_p} \int_0^{2\pi} d\phi_s \int_{\mathbb{R}^3} d\mathbf{k}_i \, \Bigl[ \bigl(\chi_{\mathrm{eff}}^{(2)}(\mathbf{k}_p, \epsilon_p, \mathbf{k}_s, \epsilon_s, \mathbf{k}_i, \epsilon_i)\bigr)^2 \frac{\vert{}\mathbf{k}_s\vert{}^4 \omega_s \omega_i}{n_s^2 n_i^2} \mathrm{sinc}^2\!\left(\frac{\Delta\omega\, T_I}{2}\right) \mathrm{sinc}^2\!\left(\frac{\Delta k_z L}{2}\right) e^{-\frac{\omega_0^2 (\Delta k_x^2 + \Delta k_y^2)}{2}} \Bigr] \sin\theta_s \, d\theta_s \, d\lambda_s.$$
 
 We calculate this integral numerically using Quasi-Monte Carlo integration.
 
@@ -133,7 +133,7 @@ $$T_I = \frac{L}{v_g} = \frac{L n_g}{c} = \frac{L}{c}\left(n_p - \lambda_p \frac
 
 Two regimes are explored based on the values of this parameter:
 - **Continuous-wave approximation:** $T_I$ is considered to be infinite and energy conservation is imposed directly.
-- **Finite interaction time:** the spectral weighting $\operatorname{sinc}^2(\Delta\omega T_I / 2)$ is retained.
+- **Finite interaction time:** the spectral weighting $\mathrm{sinc}^2(\Delta\omega T_I / 2)$ is retained.
 
 ### Numerical integration
 
@@ -144,7 +144,7 @@ $$I \approx \frac{1}{N}\sum_{j=1}^{N}\frac{f(\mathbf{x}_j)}{p(\mathbf{x}_j)},$$
 where $f$ is the physical integrand, $p$ is the sampling density, and $\mathbf{x}_j$ are sampled points.
 The transverse momentum mismatches are sampled from Gaussian distributions determined by the pump waist.
 For finite interaction time, the code samples the longitudinal mismatch through an approximation 
-to the $\operatorname{sinc}^2$ distribution using a three-Gaussian mixture.
+to the $\mathrm{sinc}^2$ distribution using a three-Gaussian mixture.
 This concentrates samples near the dominant central and first side maxima.
 
 ![sinc^2 approximation](images/sinc_approximation.png)
@@ -284,7 +284,7 @@ Its principal approximations include:
 - paraxial propagation is used where appropriate;
 - the convolution method assumes an approximately translation-invariant kernel;
 - finite detector and object-plane sampling affect reported resolution;
-- the sampled $\operatorname{sinc}^2$ approximation may underrepresent higher-order side lobes of the function.
+- the sampled $\mathrm{sinc}^2$ approximation may underrepresent higher-order side lobes of the function.
 
 ## Requirements
 
